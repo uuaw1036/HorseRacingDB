@@ -307,8 +307,10 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
 
     try:
         # pandasのバージョンによっては文字列を直接渡すとエラーになるため
-        # StringIOで包んで渡す
-        tables = pd.read_html(StringIO(response.text))
+        # StringIOで包んで渡す。
+        # flavor="lxml"を明示しないと、内部でlxml→html5libの順に試そうとして
+        # (html5libが未インストールの環境では) ImportErrorになることがあるため固定する。
+        tables = pd.read_html(StringIO(response.text), flavor="lxml")
     except ValueError:
         tables = []
 
