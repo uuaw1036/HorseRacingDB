@@ -40,7 +40,7 @@ HEADERS = {
 }
 
 # リクエスト間の待機秒数(サーバー負荷軽減のため。短くしすぎない)
-WAIT_SECONDS = 2.0
+WAIT_SECONDS = 1.5
 
 
 def parse_distance_column(value: str):
@@ -341,7 +341,14 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
             "→ この列一覧を貼ってもらえれば、リネーム対応表を修正します。"
         )
 
-    out = out[required].dropna(subset=["距離"])
+    # 馬番・人気・斤量はあれば引き継ぐ。無い場合は空欄(NaN)の列として追加し、
+    # 呼び出し側(compare_times.py)が常に同じ列構成を前提にできるようにする。
+    optional = ["馬番", "人気", "斤量"]
+    for col in optional:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    out = out[required + optional].dropna(subset=["距離"])
     out["距離"] = out["距離"].astype(int)
 
     # compare_times.py の parse_time をそのまま使ってタイム_秒を追加
