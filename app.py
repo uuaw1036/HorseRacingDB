@@ -9,6 +9,7 @@ from scrape_netkeiba import (
     get_horse_past_results,
     get_race_entries,
     get_race_list,
+    parse_distance_column,
     prepare_for_compare,
 )
 from compare_times import best_time_per_horse, compare_by_distance
@@ -21,7 +22,27 @@ st.write(
     "を自動取得して比較します。"
 )
 
-AUTO_LABEL = "全体（距離ごとの自己ベスト一覧）"
+# 人気の色分け(セル背景色)
+NINKI_COLORS = {
+    1: "#FFF3B0",  # 黄色
+    2: "#B3E5FC",  # 水色
+    3: "#FFCDD2",  # 薄い赤
+}
+
+# 最終的な表示列(順位〜着順)。horse_idは表示直前に落とす。
+DISPLAY_COLUMNS = [
+    "順位",
+    "馬番",
+    "馬名",
+    "人気",
+    "馬場状態",
+    "タイム",
+    "上がり3F",
+    "馬体重",
+    "脚質",
+    "斤量",
+    "着順",
+]
 
 # --- セッション状態の初期化 -------------------------------------------
 # race_list_df: 選択した開催日のレース候補一覧
@@ -72,31 +93,46 @@ def fetch_compare_data(race_id: str):
     st.session_state.compare_race_id = race_id
 
 
-def render_result_table(compare_df: pd.DataFrame, distance_choice):
-    """セッションに保存済みのデータから、選択された距離のテーブルだけを表示する(再取得なし)。"""
-    if distance_choice == AUTO_LABEL:
-        result = best_time_per_horse(compare_df)
-        cols = ["馬名"]
-        if "馬番" in result.columns:
-            cols.append("馬番")
-        cols += ["距離", "馬場状態"]
-        for c in ["人気", "斤量"]:
-            if c in result.columns:
-                cols.append(c)
-        cols.append("表示タイム")
-        result = result[cols].reset_index(drop=True)
-        if result.empty:
-            st.info("比較できる過去成績が見つかりませんでした。")
-        else:
-            st.success("分析完了！（距離ごとの自己ベスト一覧）")
-            st.dataframe(result, use_container_width=True)
-    else:
-        result = compare_by_distance(compare_df, distance_choice)
-        if result.empty:
-            st.info(f"出走馬の中に {distance_choice}mを走った記録がある馬はいません。")
-        else:
-            st.success(f"分析完了！（{distance_choice}m 持ちタイムランキング）")
-            st.dataframe(result, use_container_width=True)
+def style_by_ninki(df: pd.DataFrame):
+    """人気列だけをセル単位で色分けするStyler。"""
+
+    def _color(val):
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            return ""
+        color = NINKI_COLORS.get(v)
+        return f"background-color: {color}" if color else ""
+
+    return df.style.applymap(_color, subset=["人気"])
+
+
+def build_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, surface: str):
+    """
+    compare_df から指定の距離・馬場種別のランキングを作り、
+    現在のレースの馬番(entriesの馬番)に差し替えて返す。
+    """
+    result = compare_by_distance(compare_df, distance, surface)
+    if result.empty:
+        return result
+
+    # 過去成績時点の馬番ではなく、今回のレースの馬番に差し替える
+    result = result.drop(columns=["馬番"]).merge(
+        entries[["horse_id", "馬番"]], on="horse_id", how="left"
+    )
+    result = result.drop(columns=["horse_id"])
+    return result[DISPLAY_COLUMNS]
+
+
+def render_result_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, surface: str):
+    """セッションに保存済みのデータから、選択された距離・馬場種別のテーブルだけを表示する(再取得なし)。"""
+    result = build_table(compare_df, entries, distance, surface)
+    if result.empty:
+        st.info(f"出走馬の中に {surface}{distance}mを走った記録がある馬はいません。")
+        return
+
+    st.success(f"分析完了！（{surface}{distance}m 持ちタイムランキング）")
+    st.dataframe(style_by_ninki(result), use_container_width=True, hide_index=True)
 
 
 # --- 1. 開催日からレースを選ぶ -----------------------------------------
@@ -136,26 +172,48 @@ elif races_df is not None:
     races_df["表示名"] = races_df.apply(_label, axis=1)
 
     choice_label = st.selectbox("レースを選択", races_df["表示名"].tolist(), key="race_choice")
-    chosen_race_id = races_df.loc[races_df["表示名"] == choice_label, "race_id"].values[0]
+    chosen_row = races_df.loc[races_df["表示名"] == choice_label].iloc[0]
+    chosen_race_id = chosen_row["race_id"]
+
+    # レース一覧に載っている「芝1800m」のような表記から、このレース自体の
+    # 馬場種別・距離を求めておく(取得後、デフォルトで表示する距離に使う)。
+    race_surface, race_distance = parse_distance_column(chosen_row.get("距離", ""))
 
     # --- 2. 出走馬の持ちタイムを取得(スクレイピングはここだけ) ---------
     if st.button("このレースの出走馬の持ちタイムを取得", use_container_width=True, key="fetch"):
         fetch_compare_data(chosen_race_id)
 
-    # --- 3. 取得済みデータがあれば、距離を切り替えて表示(再取得なし) ---
+    # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
     if (
         st.session_state.compare_df is not None
         and st.session_state.compare_race_id == chosen_race_id
     ):
         compare_df = st.session_state.compare_df
+        entries = st.session_state.compare_entries
 
-        available_distances = sorted(compare_df["距離"].dropna().unique().tolist())
-        distance_options = [AUTO_LABEL] + available_distances
-
-        distance_choice = st.selectbox(
-            "表示する距離 (m)", distance_options, index=0, key="dist_choice"
+        pairs_df = (
+            compare_df[["馬場種別", "距離"]]
+            .dropna()
+            .drop_duplicates()
+            .sort_values(["馬場種別", "距離"])
         )
+        available_pairs = list(pairs_df.itertuples(index=False, name=None))
 
-        render_result_table(compare_df, distance_choice)
+        if not available_pairs:
+            st.info("比較できる過去成績が見つかりませんでした。")
+        else:
+            labels = [f"{s}{d}m" for s, d in available_pairs]
+
+            # デフォルトはこのレース自体の馬場種別・距離。データが無ければ先頭を使う。
+            default_index = 0
+            if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
+                default_index = available_pairs.index((race_surface, race_distance))
+
+            choice_label2 = st.selectbox(
+                "表示する距離 (m)", labels, index=default_index, key="dist_choice"
+            )
+            surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
+
+            render_result_table(compare_df, entries, distance_choice, surface_choice)
     elif st.session_state.compare_race_id is not None and st.session_state.compare_race_id != chosen_race_id:
         st.info("別のレースを選択しました。「出走馬の持ちタイムを取得」を押して取得してください。")

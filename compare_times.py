@@ -54,69 +54,114 @@ def load_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
+DISPLAY_COLUMNS = [
+    "horse_id",  # 表示はしないが、現在のレースの馬番を突き合わせるために残す
+    "順位",
+    "馬番",
+    "馬名",
+    "人気",
+    "馬場状態",
+    "タイム",
+    "上がり3F",
+    "馬体重",
+    "脚質",
+    "斤量",
+    "着順",
+]
+
+
 def best_time_per_horse(df: pd.DataFrame) -> pd.DataFrame:
     """
-    馬ごとの自己ベストタイム(持ちタイム)を距離別に抽出する。
-    同じ馬・同じ距離で複数レコードがある場合は最速タイムを採用。
+    馬ごとの自己ベストタイム(持ちタイム)を「距離 × 馬場種別(芝/ダ)」別に抽出する。
+    芝とダートはタイムの単純比較ができないため、同じ距離でも別集計にする。
+    同じ馬・同じ距離・同じ馬場種別で複数レコードがある場合は最速タイムを採用。
     """
-    idx = df.groupby(["馬名", "距離"])["タイム_秒"].idxmin()
+    df = df.copy()
+    if "馬場種別" not in df.columns:
+        # load_data() 経由などで馬場種別が無いデータを渡された場合のフォールバック
+        df["馬場種別"] = "―"
+
+    group_cols = ["馬名", "距離", "馬場種別"]
+    if "horse_id" in df.columns:
+        group_cols = ["horse_id"] + group_cols
+
+    idx = df.groupby(group_cols)["タイム_秒"].idxmin()
     best_df = df.loc[idx].copy()
     best_df["表示タイム"] = best_df["タイム_秒"].apply(seconds_to_time_str)
-    return best_df.sort_values(["距離", "タイム_秒"])
+    return best_df.sort_values(["馬場種別", "距離", "タイム_秒"])
 
 
-def compare_by_distance(df: pd.DataFrame, distance: int) -> pd.DataFrame:
+def compare_by_distance(df: pd.DataFrame, distance: int, surface: str = None) -> pd.DataFrame:
     """
-    指定した距離の出走馬同士で持ちタイムを比較し、速い順にランキングする。
+    指定した距離(・馬場種別)の出走馬同士で持ちタイムを比較し、速い順にランキングする。
+
+    surface: "芝" / "ダ" / "障" を指定すると、その馬場種別だけに絞り込む。
+             Noneの場合は距離が一致する全馬場種別を対象にする(通常は
+             呼び出し側で芝/ダートを分けて2回呼ぶ想定)。
+
+    戻り値の列は 順位・馬番・馬名・人気・馬場状態・タイム・上がり3F・馬体重・
+    脚質・斤量・着順 の順(horse_idは突き合わせ用に残すが表示側で落とす)。
+    「タイム」列はここでは自己ベスト時点のタイム(表示用文字列)。
+    「馬番」はここでは自己ベストを出したレース時点の馬番のままなので、
+    現在のレースの馬番に差し替える場合は呼び出し側(app.py)で
+    出馬表データ(horse_id -> 馬番)をマージして上書きすること。
+    「脚質」はnetkeibaの過去成績データに含まれていないため、現時点では
+    空欄になる。
     """
     best_df = best_time_per_horse(df)
     subset = best_df[best_df["距離"] == distance].copy()
+    if surface is not None:
+        subset = subset[subset["馬場種別"] == surface]
     subset = subset.sort_values("タイム_秒").reset_index(drop=True)
     subset.insert(0, "順位", subset.index + 1)
 
-    # 馬番・人気・斤量は列があれば表示に含める(無ければ単純にスキップ=空欄扱い)
-    cols = ["順位", "馬名"]
-    for c in ["馬番"]:
-        if c in subset.columns:
-            cols.append(c)
-    cols += ["距離", "馬場状態"]
-    for c in ["人気", "斤量"]:
-        if c in subset.columns:
-            cols.append(c)
-    cols += ["表示タイム", "タイム_秒"]
+    subset = subset.drop(columns=["タイム"], errors="ignore").rename(
+        columns={"表示タイム": "タイム"}
+    )
 
-    return subset[cols]
+    for col in DISPLAY_COLUMNS:
+        if col not in subset.columns:
+            subset[col] = pd.NA
+
+    return subset[DISPLAY_COLUMNS].reset_index(drop=True)
 
 
-def compare_specific_horses(df: pd.DataFrame, horse_names: list, distance: int) -> pd.DataFrame:
+def compare_specific_horses(
+    df: pd.DataFrame, horse_names: list, distance: int, surface: str = None
+) -> pd.DataFrame:
     """
-    出走予定馬のリストを渡して、その距離での持ちタイムだけを比較する。
+    出走予定馬のリストを渡して、その距離・馬場種別での持ちタイムだけを比較する。
     (レース前に出走メンバーだけで比べたい場合に使用)
     """
-    ranking = compare_by_distance(df, distance)
+    ranking = compare_by_distance(df, distance, surface)
     return ranking[ranking["馬名"].isin(horse_names)].reset_index(drop=True)
 
 
 if __name__ == "__main__":
     # ------ 動作確認用のサンプルデータ ------
     sample_csv = "sample_horses.csv"
-    sample_data = """馬名,距離,馬場状態,タイム
-サンプルホースA,1600,良,1:33.4
-サンプルホースB,1600,稍重,1:34.0
-サンプルホースC,1600,良,1:33.9
-サンプルホースA,2000,良,1:59.5
-サンプルホースD,2000,良,1:58.8
+    sample_data = """馬名,距離,馬場種別,馬場状態,タイム
+サンプルホースA,1600,芝,良,1:33.4
+サンプルホースB,1600,芝,稍重,1:34.0
+サンプルホースC,1600,芝,良,1:33.9
+サンプルホースA,2000,芝,良,1:59.5
+サンプルホースD,2000,芝,良,1:58.8
+サンプルホースA,1600,ダ,良,1:36.2
 """
     with open(sample_csv, "w", encoding="utf-8") as f:
         f.write(sample_data)
 
     df = load_data(sample_csv)
 
-    print("=== 1600m 持ちタイムランキング ===")
-    print(compare_by_distance(df, 1600).to_string(index=False))
+    print("=== 芝1600m 持ちタイムランキング ===")
+    print(compare_by_distance(df, 1600, "芝").to_string(index=False))
 
-    print("\n=== 2000m 持ちタイムランキング ===")
-    print(compare_by_distance(df, 2000).to_string(index=False))
+    print("\n=== 芝2000m 持ちタイムランキング ===")
+    print(compare_by_distance(df, 2000, "芝").to_string(index=False))
 
-    print("\n=== 出走予定馬だけを比較(例: A, C) ===")
-    print(compare_specific_horses(df, ["サンプルホースA", "サンプルホースC"], 1600).to_string(index=False))
+    print("\n=== 出走予定馬だけを比較(例: A, C / 芝1600m) ===")
+    print(
+        compare_specific_horses(
+            df, ["サンプルホースA", "サンプルホースC"], 1600, "芝"
+        ).to_string(index=False)
+    )

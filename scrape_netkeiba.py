@@ -121,8 +121,29 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
         if horse_id in seen:
             continue  # ページ内に同じ馬へのリンクが複数出るため重複除外
         name = a.get("title") or a.text.strip()
-        if name:
-            seen[horse_id] = name
+        if not name:
+            continue
+
+        # このレースでの馬番を、同じ行(<tr>)の中から探す。
+        # netkeibaの出馬表は <td class="Umaban ..."> に馬番が入っているのが
+        # 一般的だが、HTML構造はサイト改修で変わることがあるため、
+        # 見つからない場合は行内の最初の数字セルをフォールバックとして使う。
+        umaban = None
+        tr = a.find_parent("tr")
+        if tr is not None:
+            umaban_cell = tr.select_one("td[class*='Umaban']")
+            if umaban_cell is None:
+                for td in tr.find_all("td"):
+                    text = td.get_text(strip=True)
+                    if text.isdigit():
+                        umaban_cell = td
+                        break
+            if umaban_cell is not None:
+                text = umaban_cell.get_text(strip=True)
+                if text.isdigit():
+                    umaban = int(text)
+
+        seen[horse_id] = {"馬名": name, "馬番": umaban}
 
     if not seen:
         raise ValueError(
@@ -130,7 +151,12 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
             "race_idが正しいか、レースがまだ発表されていない可能性があります。"
         )
 
-    return pd.DataFrame({"horse_id": list(seen.keys()), "馬名": list(seen.values())})
+    return pd.DataFrame(
+        [
+            {"horse_id": hid, "馬名": v["馬名"], "馬番": v["馬番"]}
+            for hid, v in seen.items()
+        ]
+    )
 
 
 def get_race_list(date: str) -> pd.DataFrame:
@@ -328,11 +354,12 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
     # astype(int) が生の文字列側にも適用されてエラーになるため注意。
     out = (
         df.drop(columns=["距離"], errors="ignore")
-        .rename(columns={"距離_m": "距離", "馬場": "馬場状態"})
+        .rename(columns={"距離_m": "距離", "馬場": "馬場状態", "上り": "上がり3F"})
         .copy()
     )
 
-    required = ["馬名", "距離", "馬場状態", "タイム"]
+    # 馬場種別(芝/ダ)は距離と同じ距離数値でも別物として扱うために必須にする
+    required = ["馬名", "距離", "馬場状態", "タイム", "馬場種別"]
     missing = [col for col in required if col not in out.columns]
     if missing:
         raise KeyError(
@@ -341,14 +368,21 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
             "→ この列一覧を貼ってもらえれば、リネーム対応表を修正します。"
         )
 
-    # 馬番・人気・斤量はあれば引き継ぐ。無い場合は空欄(NaN)の列として追加し、
-    # 呼び出し側(compare_times.py)が常に同じ列構成を前提にできるようにする。
-    optional = ["馬番", "人気", "斤量"]
+    # horse_id は、このあと現在のレースの「出馬表の馬番」を突き合わせる
+    # (=過去成績の馬番はそのレース時点のものなので使わない)ために残しておく。
+    if "horse_id" not in out.columns:
+        out["horse_id"] = pd.NA
+
+    # 人気・斤量・上がり3F・馬体重・着順はあれば引き継ぐ。無い場合は空欄(NaN)の
+    # 列として追加し、呼び出し側(compare_times.py)が常に同じ列構成を前提に
+    # できるようにする。
+    # ※「脚質」はnetkeibaの過去成績テーブルには含まれていないため取得できない。
+    optional = ["人気", "斤量", "上がり3F", "馬体重", "着順"]
     for col in optional:
         if col not in out.columns:
             out[col] = pd.NA
 
-    out = out[required + optional].dropna(subset=["距離"])
+    out = out[["horse_id"] + required + optional].dropna(subset=["距離"])
     out["距離"] = out["距離"].astype(int)
 
     # compare_times.py の parse_time をそのまま使ってタイム_秒を追加
