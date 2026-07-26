@@ -94,7 +94,12 @@ def fetch_compare_data(race_id: str):
 
 
 def style_by_ninki(df: pd.DataFrame):
-    """人気列だけをセル単位で色分けするStyler。"""
+    """人気列だけをセル単位で色分けするStyler。
+
+    pandas 2.1でStyler.applymap()は非推奨となり、後のバージョンでは
+    Styler.map()に置き換わっている(環境によってはapplymapがもう存在しない)。
+    両方のpandasバージョンで動くよう、mapがあればそちらを使う。
+    """
 
     def _color(val):
         try:
@@ -104,7 +109,10 @@ def style_by_ninki(df: pd.DataFrame):
         color = NINKI_COLORS.get(v)
         return f"background-color: {color}" if color else ""
 
-    return df.style.applymap(_color, subset=["人気"])
+    styler = df.style
+    if hasattr(styler, "map"):
+        return styler.map(_color, subset=["人気"])
+    return styler.applymap(_color, subset=["人気"])
 
 
 def build_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, surface: str):
