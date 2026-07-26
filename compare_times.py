@@ -134,6 +134,83 @@ def compare_specific_horses(
     return ranking[ranking["馬名"].isin(horse_names)].reset_index(drop=True)
 
 
+def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_horse_id: str):
+    """
+    出走予定馬同士の対戦成績(過去に同じレースに出走したことがある場合の
+    着順比較)を求める。
+
+    raw_df: 出走予定馬それぞれの get_horse_past_results() を連結したデータ
+            (scrape_netkeiba.get_horse_past_results が付与する
+            "race_id_key" 列を含む)。持ちタイム比較用にすでに取得済みの
+            データをそのまま再利用するだけなので、追加のスクレイピングは
+            発生しない。
+    entries: 今回のレースの出走予定馬一覧(horse_id・馬名を含む)。
+    target_horse_id: 基準にする馬の horse_id。
+
+    戻り値: (summary_df, detail_df) のタプル。
+      summary_df: 対戦相手ごとの通算成績(○勝●敗△分)。
+      detail_df:  レースごとの対戦詳細(日付・レース名・着順など)。
+      対戦記録が無い場合はどちらも空のDataFrame。
+    """
+    empty = pd.DataFrame()
+    if raw_df is None or raw_df.empty or "race_id_key" not in raw_df.columns:
+        return empty, empty
+
+    target_races = raw_df.loc[
+        (raw_df["horse_id"] == target_horse_id) & raw_df["race_id_key"].notna(),
+        ["race_id_key", "着順", "日付", "レース名"],
+    ].rename(columns={"着順": "本馬着順"})
+
+    if target_races.empty:
+        return empty, empty
+
+    entry_ids = entries["horse_id"].tolist()
+    others = raw_df.loc[
+        (raw_df["horse_id"] != target_horse_id)
+        & raw_df["horse_id"].isin(entry_ids)
+        & raw_df["race_id_key"].notna(),
+        ["horse_id", "馬名", "race_id_key", "着順"],
+    ].rename(columns={"着順": "相手着順", "馬名": "対戦相手"})
+
+    merged = others.merge(target_races, on="race_id_key", how="inner")
+    if merged.empty:
+        return empty, empty
+
+    def _to_num(x):
+        try:
+            return int(str(x).strip())
+        except (TypeError, ValueError):
+            return None
+
+    merged["_本馬着順数"] = merged["本馬着順"].apply(_to_num)
+    merged["_相手着順数"] = merged["相手着順"].apply(_to_num)
+
+    def _result(row):
+        a, b = row["_本馬着順数"], row["_相手着順数"]
+        if a is None or b is None:
+            return "―"
+        if a < b:
+            return "○"
+        if a > b:
+            return "●"
+        return "△"
+
+    merged["結果"] = merged.apply(_result, axis=1)
+
+    summary_df = (
+        merged.groupby("対戦相手")["結果"]
+        .apply(lambda s: f"{(s == '○').sum()}勝{(s == '●').sum()}敗{(s == '△').sum()}分")
+        .reset_index()
+        .rename(columns={"結果": "対戦成績(本馬から見て)"})
+    )
+
+    detail_df = merged[
+        ["対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果"]
+    ].sort_values(["対戦相手", "日付"]).reset_index(drop=True)
+
+    return summary_df, detail_df
+
+
 if __name__ == "__main__":
     # ------ 動作確認用のサンプルデータ ------
     sample_csv = "sample_horses.csv"

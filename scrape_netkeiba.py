@@ -24,11 +24,11 @@ netkeibaの利用規約では、サービス運営に支障をきたすような
 ------------------------------------------------
 """
 
+import copy
 import re
 import time
 import requests
 import pandas as pd
-from io import StringIO
 from bs4 import BeautifulSoup
 
 HEADERS = {
@@ -41,6 +41,78 @@ HEADERS = {
 
 # リクエスト間の待機秒数(サーバー負荷軽減のため。短くしすぎない)
 WAIT_SECONDS = 1.5
+
+
+def _clean_header_cell_text(th) -> str:
+    """
+    <th>セルからテキストを取り出す。
+
+    netkeibaの成績テーブルには「タイム指数」列のように、見た目には
+    表示されない(style="display:none")切り替え用ドロップダウンの
+    テキスト("タイム指数(通常)"などの<a>要素)がヘッダーセル内部に
+    埋め込まれていることがある。BeautifulSoup/pandasのテキスト抽出は
+    CSSのdisplay:noneを考慮しないため、そのまま get_text() すると
+    列名にこの非表示テキストが混入し、列名の重複や意図しない列名の
+    原因になる。ここでは style="display:none" が付いた要素と img だけを
+    取り除いてから本来のラベルだけを取得する(可視テキストをラップして
+    いるだけの<div>までまとめて消してしまわないよう、hidden指定のある
+    要素だけをピンポイントで除去する)。
+    """
+    th_copy = copy.deepcopy(th)
+
+    hidden_tags = [
+        tag
+        for tag in th_copy.find_all(True)
+        if re.search(r"display\s*:\s*none", tag.get("style", ""))
+    ]
+    for tag in hidden_tags:
+        tag.decompose()
+
+    for tag in th_copy.find_all("img"):
+        tag.decompose()
+
+    return th_copy.get_text(strip=True).replace(" ", "").replace("　", "")
+
+
+def _parse_race_result_table(table) -> pd.DataFrame:
+    """
+    <table>要素からthead/tbodyを直接たどって列を組み立てる。
+
+    pandas.read_html は列名の重複解消(.1などのサフィックス付与)を
+    自動で行うが、その過程やヘッダーセル内の非表示テキスト混入により
+    列と値がずれることがあるため、ここでは「ヘッダーの位置」と
+    「各行の位置」を素直に対応させるだけの単純な方式にしている。
+
+    あわせて、「レース名」列のリンク先URLから race_id を抜き出し、
+    "race_id_key" 列として追加する(対戦成績機能で、出走予定馬同士が
+    同じレースに出走していたかどうかを判定するための一意キーとして使う)。
+    """
+    header_row = table.find("thead").find("tr")
+    columns = [_clean_header_cell_text(th) for th in header_row.find_all("th")]
+    race_name_idx = columns.index("レース名") if "レース名" in columns else None
+
+    rows = []
+    race_id_keys = []
+    tbody = table.find("tbody")
+    for tr in (tbody.find_all("tr") if tbody else []):
+        tds = tr.find_all("td")
+        # ヘッダーと列数が合わない行(まれなレイアウト崩れ)は安全のためスキップ
+        if len(tds) != len(columns):
+            continue
+        rows.append([td.get_text(strip=True) for td in tds])
+
+        race_id_key = None
+        if race_name_idx is not None:
+            a = tds[race_name_idx].find("a", href=True)
+            if a is not None:
+                m = re.search(r"/race/(\d+)/?", a["href"])
+                if m:
+                    race_id_key = m.group(1)
+        race_id_keys.append(race_id_key)
+
+    result = pd.DataFrame(rows, columns=columns)
+    result["race_id_key"] = race_id_keys
+    return result
 
 
 def parse_distance_column(value: str):
@@ -316,15 +388,10 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
         else horse_id
     )
 
-    try:
-        # pandasのバージョンによっては文字列を直接渡すとエラーになるため
-        # StringIOで包んで渡す。
-        # flavor="lxml"を明示しないと、内部でlxml→html5libの順に試そうとして
-        # (html5libが未インストールの環境では) ImportErrorになることがあるため固定する。
-        tables = pd.read_html(StringIO(response.text), flavor="lxml")
-    except ValueError:
-        tables = []
-
+    # pandas.read_html は使わず、thead/tbodyを直接たどって列を組み立てる
+    # (ヘッダーセル内の非表示ドロップダウンテキストの混入や、列名重複の
+    # 自動解消処理によって値がずれる問題を避けるため)。
+    #
     # 「タイム」列を持つテーブルは複数存在することがある(例: ページ上部の
     # 簡易な近走サマリー表など)。それらは列数が少なく「上り」(上がり3F)や
     # 「馬体重」を含まないことが多いため、単純に最初に見つかったものを
@@ -332,15 +399,23 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
     # そこで、まず「タイム」に加えて「上り」「馬体重」も含む(=本来の
     # 全成績テーブルらしい)ものを優先し、それが無ければ列数が最も多い
     # テーブルを採用する。
-    candidates = [t for t in tables if "タイム" in t.columns]
+    candidates = []
+    for t in soup.find_all("table"):
+        thead = t.find("thead")
+        if thead is None or thead.find("tr") is None:
+            continue
+        header_texts = [_clean_header_cell_text(th) for th in thead.find("tr").find_all("th")]
+        if "タイム" in header_texts:
+            candidates.append((t, header_texts))
 
     df = None
-    for t in candidates:
-        if "上り" in t.columns and "馬体重" in t.columns:
-            df = t
+    for t, header_texts in candidates:
+        if "上り" in header_texts and "馬体重" in header_texts:
+            df = _parse_race_result_table(t)
             break
     if df is None and candidates:
-        df = max(candidates, key=lambda t: t.shape[1])
+        best_t, _ = max(candidates, key=lambda pair: len(pair[1]))
+        df = _parse_race_result_table(best_t)
 
     if df is None:
         raise ValueError(
@@ -348,12 +423,7 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
             "新馬(未出走)の可能性、またはサイトのHTML構造が変わっている可能性があります。"
         )
 
-    # 列名に空白(半角/全角)が混入することがあるため正規化する
-    # 例: "馬 場" -> "馬場", "頭 数" -> "頭数"
-    df.columns = [str(c).replace(" ", "").replace("　", "") for c in df.columns]
-
     # タイムが空欄の行(出走取消・除外など)は除外
-    df = df.dropna(subset=["タイム"])
     df = df[df["タイム"].astype(str).str.strip() != ""]
 
     # 距離列を (馬場種別, 距離数値) に分離

@@ -12,7 +12,7 @@ from scrape_netkeiba import (
     parse_distance_column,
     prepare_for_compare,
 )
-from compare_times import best_time_per_horse, compare_by_distance
+from compare_times import best_time_per_horse, compare_by_distance, head_to_head_records
 
 st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
 
@@ -48,7 +48,11 @@ DISPLAY_COLUMNS = [
 # compare_df / compare_entries / compare_race_id: 一度取得した出走馬の
 #   持ちタイムデータ。距離の切り替えはここから再計算するだけにして、
 #   スクレイピングを何度も走らせないようにする。
-for key in ["race_list_df", "compare_df", "compare_entries", "compare_race_id"]:
+# raw_df: 各出走馬の過去成績の生データ(persist_for_compare前)。
+#   対戦成績(馬同士の勝敗)機能で使う。持ちタイム取得時に一度スクレイピング
+#   したデータをそのまま再利用し、対戦成績のためだけの追加スクレイピングは
+#   行わない。
+for key in ["race_list_df", "compare_df", "compare_entries", "compare_race_id", "raw_df"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -90,6 +94,7 @@ def fetch_compare_data(race_id: str):
     st.session_state.compare_df = compare_df
     st.session_state.compare_entries = entries
     st.session_state.compare_race_id = race_id
+    st.session_state.raw_df = raw_df
 
 
 def style_by_ninki(df: pd.DataFrame):
@@ -147,6 +152,29 @@ def render_result_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distanc
 
     st.success(f"分析完了！（{surface}{distance}m 持ちタイムランキング）")
     st.dataframe(style_by_ninki(result), use_container_width=True, hide_index=True)
+
+
+def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
+    """出走予定馬同士の対戦成績を表示する(持ちタイム取得時のデータを再利用。追加スクレイピングなし)。"""
+    st.subheader("🥊 出走馬同士の対戦成績")
+
+    horse_label_to_id = dict(zip(entries["馬名"], entries["horse_id"]))
+    selected_name = st.selectbox(
+        "基準にする馬を選択", list(horse_label_to_id.keys()), key="h2h_horse"
+    )
+    target_id = horse_label_to_id[selected_name]
+
+    summary_df, detail_df = head_to_head_records(raw_df, entries, target_id)
+
+    if summary_df.empty:
+        st.info(f"{selected_name} が他の出走予定馬と同じレースに出走した記録は見つかりませんでした。")
+        return
+
+    st.write(f"**{selected_name}** と過去に同じレースに出走したことのある出走予定馬との対戦成績:")
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    with st.expander("対戦の詳細（レースごとの着順）を見る"):
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 
 # --- 1. 開催日からレースを選ぶ -----------------------------------------
@@ -228,12 +256,18 @@ elif races_df is not None:
         fetch_compare_data(chosen_race_id)
 
     # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
-    if (
-        st.session_state.compare_df is not None
-        and st.session_state.compare_race_id == chosen_race_id
-    ):
+    # 別のレースを選んでも、再取得ボタンを押すまでは前回取得したデータを
+    # そのまま表示し続ける(選択中のレースと取得済みデータのレースが
+    # 異なる場合はその旨だけ注記する)。
+    if st.session_state.compare_df is not None:
         compare_df = st.session_state.compare_df
         entries = st.session_state.compare_entries
+
+        if st.session_state.compare_race_id != chosen_race_id:
+            st.caption(
+                "※ 現在表示中のデータは以前取得したレースのものです。"
+                "選択中のレースに更新するには「出走馬の持ちタイムを取得」を押してください。"
+            )
 
         pairs_df = (
             compare_df[["馬場種別", "距離"]]
@@ -259,5 +293,6 @@ elif races_df is not None:
             surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
 
             render_result_table(compare_df, entries, distance_choice, surface_choice)
-    elif st.session_state.compare_race_id is not None and st.session_state.compare_race_id != chosen_race_id:
-        st.info("別のレースを選択しました。「出走馬の持ちタイムを取得」を押して取得してください。")
+
+        st.divider()
+        render_head_to_head(st.session_state.raw_df, entries)
