@@ -133,6 +133,93 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
     return pd.DataFrame({"horse_id": list(seen.keys()), "馬名": list(seen.values())})
 
 
+def get_race_list(date: str) -> pd.DataFrame:
+    """
+    指定した開催日に行われるレースの一覧(race_id・開催場・R番号・
+    発走時刻・レース名)を取得する。
+
+    date: "YYYYMMDD" 形式の文字列 (例: "20250504")。"2025-05-04" や
+          "2025/05/04" のようにハイフン・スラッシュ入りで渡しても
+          自動的に取り除いて解釈する。
+
+    URL: https://race.netkeiba.com/top/race_list.html?kaisai_date={date}
+
+    ※ 注意: このページのHTML構造(クラス名など)はサイト改修で変わる
+      ことがある。まず想定される構造(RaceList_DataItem など)で
+      抽出を試み、うまく取れなかった場合は「race_id を含むリンクを
+      片っ端から拾う」汎用フォールバックに切り替える。それでも
+      0件の場合は、その日開催が無いか、サイト構造が大きく変わった
+      可能性が高い(その場合は app.py の「レースIDを直接入力」タブ
+      から従来通りレースIDを手入力してください)。
+    """
+    date = str(date).strip().replace("-", "").replace("/", "")
+    if not re.fullmatch(r"\d{8}", date):
+        raise ValueError(f"日付は YYYYMMDD 形式で指定してください(例: 20250504): {date}")
+
+    url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
+    response = requests.get(url, headers=HEADERS)
+    response.raise_for_status()
+    response.encoding = "utf-8"  # race.netkeiba.com は UTF-8
+
+    soup = BeautifulSoup(response.text, "lxml")
+
+    races = {}
+
+    # --- 1) 構造化された抽出を試みる ---------------------------------
+    for item in soup.select("li.RaceList_DataItem"):
+        a = item.find("a", href=True)
+        if not a:
+            continue
+        m = re.search(r"race_id=(\d{10,12})", a["href"])
+        if not m:
+            continue
+        race_id = m.group(1)
+
+        title_el = item.select_one(".RaceList_ItemTitle, .ItemTitle")
+        time_el = item.select_one(".RaceList_Itemtime, .Itemtime")
+        num_el = item.select_one(".Race_Num, .RaceList_ItemNumber")
+        venue_el = item.find_previous(class_=re.compile("RaceList_DataHeader|Kaisai_Word|Kaisai"))
+
+        races[race_id] = {
+            "race_id": race_id,
+            "開催": venue_el.get_text(strip=True) if venue_el else "",
+            "R": num_el.get_text(strip=True) if num_el else "",
+            "発走時刻": time_el.get_text(strip=True) if time_el else "",
+            "レース名": title_el.get_text(strip=True) if title_el else a.get_text(strip=True),
+        }
+
+    # --- 2) 何も取れなかった場合、リンクの汎用走査にフォールバック ----
+    if not races:
+        for a in soup.find_all("a", href=True):
+            m = re.search(r"race_id=(\d{10,12})", a["href"])
+            if not m:
+                continue
+            race_id = m.group(1)
+            if race_id in races:
+                continue
+            text = a.get_text(strip=True)
+            if not text:
+                continue
+            time_m = re.search(r"\d{1,2}:\d{2}", text)
+            races[race_id] = {
+                "race_id": race_id,
+                "開催": "",
+                "R": "",
+                "発走時刻": time_m.group(0) if time_m else "",
+                "レース名": text,
+            }
+
+    if not races:
+        raise ValueError(
+            f"{date} のレースが見つかりませんでした。開催が無い日か、"
+            "サイトのHTML構造が変わっている可能性があります。"
+            "その場合はレースIDを直接入力する方法をお試しください。"
+        )
+
+    df = pd.DataFrame(list(races.values()))
+    return df.sort_values(["開催", "発走時刻"]).reset_index(drop=True)
+
+
 def get_horse_past_results(horse_id: str) -> pd.DataFrame:
     """
     netkeibaの「競走成績」ページから過去のレース成績表を取得する。
