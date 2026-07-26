@@ -73,7 +73,19 @@ def compare_by_distance(df: pd.DataFrame, distance: int) -> pd.DataFrame:
     subset = best_df[best_df["距離"] == distance].copy()
     subset = subset.sort_values("タイム_秒").reset_index(drop=True)
     subset.insert(0, "順位", subset.index + 1)
-    return subset[["順位", "馬名", "距離", "馬場状態", "表示タイム", "タイム_秒"]]
+
+    # 馬番・人気・斤量は列があれば表示に含める(無ければ単純にスキップ=空欄扱い)
+    cols = ["順位", "馬名"]
+    for c in ["馬番"]:
+        if c in subset.columns:
+            cols.append(c)
+    cols += ["距離", "馬場状態"]
+    for c in ["人気", "斤量"]:
+        if c in subset.columns:
+            cols.append(c)
+    cols += ["表示タイム", "タイム_秒"]
+
+    return subset[cols]
 
 
 def compare_specific_horses(df: pd.DataFrame, horse_names: list, distance: int) -> pd.DataFrame:
