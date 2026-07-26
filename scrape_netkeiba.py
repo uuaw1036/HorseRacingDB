@@ -40,7 +40,7 @@ HEADERS = {
 }
 
 # リクエスト間の待機秒数(サーバー負荷軽減のため。短くしすぎない)
-WAIT_SECONDS = 1.0
+WAIT_SECONDS = 2.0
 
 
 def parse_distance_column(value: str):
@@ -142,8 +142,13 @@ def get_race_list(date: str) -> pd.DataFrame:
           "2025/05/04" のようにハイフン・スラッシュ入りで渡しても
           自動的に取り除いて解釈する。
 
-    URL: https://race.netkeiba.com/top/race_list.html?kaisai_date={date}
+    URL: https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date}
 
+    ※ 「race_list.html」(末尾に "_sub" が付かない方)はJavaScriptで
+      レース一覧を後から描画するページで、requestsで取得した生HTMLには
+      実データが含まれていない(確認済み)。実データは race_list.js が
+      Ajaxで読み込んでいる「race_list_sub.html」側に載っているため、
+      必ずこちらを使うこと。
     ※ 注意: このページのHTML構造(クラス名など)はサイト改修で変わる
       ことがある。まず想定される構造(RaceList_DataItem など)で
       抽出を試み、うまく取れなかった場合は「race_id を含むリンクを
@@ -156,8 +161,11 @@ def get_race_list(date: str) -> pd.DataFrame:
     if not re.fullmatch(r"\d{8}", date):
         raise ValueError(f"日付は YYYYMMDD 形式で指定してください(例: 20250504): {date}")
 
-    url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
-    response = requests.get(url, headers=HEADERS)
+    url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date}"
+    sub_headers = dict(HEADERS)
+    sub_headers["Referer"] = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
+    sub_headers["X-Requested-With"] = "XMLHttpRequest"
+    response = requests.get(url, headers=sub_headers)
     response.raise_for_status()
     response.encoding = "utf-8"  # race.netkeiba.com は UTF-8
 
