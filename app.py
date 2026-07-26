@@ -107,8 +107,9 @@ with tab1:
                 for p in [
                     row["発走時刻"],
                     row["開催"],
-                    (f"{row['R']}R" if row["R"] else ""),
+                    (row["R"] if row["R"] else ""),
                     row["レース名"],
+                    (f"({row['距離']})" if row.get("距離") else ""),
                 ]
                 if p
             ]

@@ -166,27 +166,51 @@ def get_race_list(date: str) -> pd.DataFrame:
     races = {}
 
     # --- 1) 構造化された抽出を試みる ---------------------------------
-    for item in soup.select("li.RaceList_DataItem"):
-        a = item.find("a", href=True)
-        if not a:
-            continue
-        m = re.search(r"race_id=(\d{10,12})", a["href"])
-        if not m:
-            continue
-        race_id = m.group(1)
+    # 開催(競馬場)のブロック <dl class="RaceList_DataList"> ごとに、
+    # ヘッダー(.RaceList_DataTitle: 例 "2回 福島 3日目")と、その中の
+    # 各レース <li class="RaceList_DataItem"> を辿る。
+    for block in soup.select("dl.RaceList_DataList"):
+        venue = ""
+        title_el = block.select_one(".RaceList_DataTitle")
+        if title_el:
+            venue = title_el.get_text(" ", strip=True)
 
-        title_el = item.select_one(".RaceList_ItemTitle, .ItemTitle")
-        time_el = item.select_one(".RaceList_Itemtime, .Itemtime")
-        num_el = item.select_one(".Race_Num, .RaceList_ItemNumber")
-        venue_el = item.find_previous(class_=re.compile("RaceList_DataHeader|Kaisai_Word|Kaisai"))
+        for item in block.select("li.RaceList_DataItem"):
+            a = item.find("a", href=True)
+            if not a:
+                continue
+            m = re.search(r"race_id=(\d{10,12})", a["href"])
+            if not m:
+                continue
+            race_id = m.group(1)
 
-        races[race_id] = {
-            "race_id": race_id,
-            "開催": venue_el.get_text(strip=True) if venue_el else "",
-            "R": num_el.get_text(strip=True) if num_el else "",
-            "発走時刻": time_el.get_text(strip=True) if time_el else "",
-            "レース名": title_el.get_text(strip=True) if title_el else a.get_text(strip=True),
-        }
+            num_el = item.select_one(".Race_Num")
+            race_num = num_el.get_text(strip=True) if num_el else ""
+
+            name_el = item.select_one(".RaceList_ItemTitle .ItemTitle")
+            race_name = name_el.get_text(strip=True) if name_el else ""
+
+            time_el = item.select_one(".RaceList_Itemtime")
+            post_time = time_el.get_text(strip=True) if time_el else ""
+
+            # 距離表示は "芝1800m"/"ダ1700m"(class=RaceList_ItemLong)のほか、
+            # 障害戦は class 無しの "障2860m" になっているため、
+            # RaceDataブロック全体のテキストから正規表現で拾う。
+            distance = ""
+            race_data_el = item.select_one(".RaceData")
+            if race_data_el:
+                dist_m = re.search(r"[芝ダ障]\d{3,4}m", race_data_el.get_text())
+                if dist_m:
+                    distance = dist_m.group(0)
+
+            races[race_id] = {
+                "race_id": race_id,
+                "開催": venue,
+                "R": race_num,
+                "発走時刻": post_time,
+                "距離": distance,
+                "レース名": race_name,
+            }
 
     # --- 2) 何も取れなかった場合、リンクの汎用走査にフォールバック ----
     if not races:
@@ -206,6 +230,7 @@ def get_race_list(date: str) -> pd.DataFrame:
                 "開催": "",
                 "R": "",
                 "発走時刻": time_m.group(0) if time_m else "",
+                "距離": "",
                 "レース名": text,
             }
 
