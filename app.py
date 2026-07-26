@@ -154,13 +154,12 @@ if races_df is not None and races_df.empty:
 
 elif races_df is not None:
 
-    def _label(row) -> str:
+    def _race_label(row) -> str:
         parts = [
             p
             for p in [
-                row["発走時刻"],
-                row["開催"],
                 (row["R"] if row["R"] else ""),
+                row["発走時刻"],
                 row["レース名"],
                 (f"({row['距離']})" if row.get("距離") else ""),
             ]
@@ -169,10 +168,41 @@ elif races_df is not None:
         return " / ".join(parts) if parts else row["race_id"]
 
     races_df = races_df.copy()
-    races_df["表示名"] = races_df.apply(_label, axis=1)
 
-    choice_label = st.selectbox("レースを選択", races_df["表示名"].tolist(), key="race_choice")
-    chosen_row = races_df.loc[races_df["表示名"] == choice_label].iloc[0]
+    # --- 1a. まず開催場所を選ぶ -----------------------------------------
+    venues = [v for v in races_df["開催"].tolist() if v]
+    # 順序を保ったまま重複を除く
+    venues = list(dict.fromkeys(venues))
+
+    if not venues:
+        # 開催場所の情報が取れなかった場合は、従来通り全レースから直接選ぶ
+        races_df["表示名"] = races_df.apply(
+            lambda r: " / ".join(
+                p
+                for p in [r["発走時刻"], (r["R"] if r["R"] else ""), r["レース名"]]
+                if p
+            )
+            or r["race_id"],
+            axis=1,
+        )
+        choice_label = st.selectbox("レースを選択", races_df["表示名"].tolist(), key="race_choice")
+        venue_races = races_df.loc[races_df["表示名"] == choice_label]
+    else:
+        chosen_venue = st.selectbox("開催場所を選択", venues, key="venue_choice")
+        venue_races = races_df.loc[races_df["開催"] == chosen_venue].copy()
+        venue_races["表示名"] = venue_races.apply(_race_label, axis=1)
+
+        # --- 1b. 次にその開催場所の中からレース(R)を選ぶ -----------------
+        # key に開催場所を含めることで、開催場所を切り替えたときに
+        # 前の開催場所での選択が残ってエラーになるのを防ぐ。
+        choice_label = st.selectbox(
+            "レースを選択",
+            venue_races["表示名"].tolist(),
+            key=f"race_choice_{chosen_venue}",
+        )
+        venue_races = venue_races.loc[venue_races["表示名"] == choice_label]
+
+    chosen_row = venue_races.iloc[0]
     chosen_race_id = chosen_row["race_id"]
 
     # レース一覧に載っている「芝1800m」のような表記から、このレース自体の
