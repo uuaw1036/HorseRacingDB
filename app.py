@@ -16,10 +16,10 @@ from compare_times import best_time_per_horse, compare_by_distance, head_to_head
 
 st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
 
-st.title("🏇 持ちタイム比較ダッシュボード")
+st.title("🏇 持ちタイム比較&対戦成績ダッシュボード")
 st.write(
-    "これから行われるレースの出走馬について、過去の持ちタイム（自己ベスト）"
-    "を自動取得して比較します。"
+    "※30分間に5回以上の取得をする際はIPアドレスを変更することを推奨します"
+    "（Wi-Fiを変更、切断、VPN接続等）"
 )
 
 # 人気の色分け(セル背景色)
@@ -150,7 +150,7 @@ def render_result_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distanc
         st.info(f"出走馬の中に {surface}{distance}mを走った記録がある馬はいません。")
         return
 
-    st.success(f"分析完了！（{surface}{distance}m 持ちタイムランキング）")
+    st.success(f"分析完了（{surface}{distance}m 持ちタイムランキング）")
     st.dataframe(style_by_ninki(result), use_container_width=True, hide_index=True)
 
 
@@ -252,7 +252,7 @@ elif races_df is not None:
     race_surface, race_distance = parse_distance_column(chosen_row.get("距離", ""))
 
     # --- 2. 出走馬の持ちタイムを取得(スクレイピングはここだけ) ---------
-    if st.button("このレースの出走馬の持ちタイムを取得", use_container_width=True, key="fetch"):
+    if st.button("このレースの出走馬の情報を取得", use_container_width=True, key="fetch"):
         fetch_compare_data(chosen_race_id)
 
     # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
