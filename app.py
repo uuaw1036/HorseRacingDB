@@ -1,44 +1,93 @@
-import streamlit as st
+import time as _time
+
 import pandas as pd
-from scrape_netkeiba import get_multiple_horses, prepare_for_compare
-from compare_times import compare_by_distance
+import streamlit as st
 
-# 画面のタイトル
+from scrape_netkeiba import (
+    WAIT_SECONDS,
+    get_horse_past_results,
+    get_race_entries,
+    prepare_for_compare,
+)
+from compare_times import best_time_per_horse, compare_by_distance
+
+st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
+
 st.title("🏇 持ちタイム比較ダッシュボード")
+st.write(
+    "netkeibaの**レースID**を入力するだけで、そのレースの出走馬全員の"
+    "過去成績を自動取得し、持ちタイム（自己ベスト）を比較します。"
+)
 
-# ユーザーに馬のIDと距離を入力させるUI
-st.write("出走馬のnetkeiba IDをカンマ区切りで入力してください。")
-horse_ids_input = st.text_input("馬ID（例: ディープ, イクイノックス）", "2002100816, 2019105258")
+with st.expander("ℹ️ レースIDの調べ方"):
+    st.write(
+        "netkeibaでレースの出馬表ページを開き、URLの `race_id=` の"
+        "後ろの数字をコピーしてください。\n\n"
+        "例: `https://race.netkeiba.com/race/shutuba.html?race_id=202506050812`\n"
+        "→ レースIDは `202506050812`"
+    )
 
-# 距離を選択するプルダウン
-distance = st.selectbox("比較する距離 (m)", [1200, 1400, 1600, 1800, 2000, 2200, 2400, 2500, 3000, 3200], index=4)
+race_id = st.text_input("レースID", placeholder="例: 202506050812")
 
-# ボタンが押されたときの処理
-if st.button("データ取得＆比較"):
-    # 入力された文字列をリストに変換
-    horse_ids = [x.strip() for x in horse_ids_input.split(",")]
-    
-    # くるくる回るローディング表示
-    with st.spinner('netkeibaから過去成績を取得中...'):
+AUTO_LABEL = "自動（出走馬の過去実績すべてを距離ごとに表示）"
+distance_options = [AUTO_LABEL, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2500, 3000, 3200]
+distance_choice = st.selectbox("比較する距離 (m)", distance_options, index=0)
+
+run = st.button("出走馬を取得して比較", use_container_width=True)
+
+if run:
+    rid = race_id.strip()
+    if not rid:
+        st.warning("レースIDを入力してください。")
+    else:
         try:
-            # scrape_netkeiba.py の機能を使ってデータ取得
-            raw_df = get_multiple_horses(horse_ids)
-            
-            if raw_df.empty:
-                st.warning("データが取得できませんでした。")
+            with st.spinner("出走馬一覧を取得中..."):
+                entries = get_race_entries(rid)
+
+            st.success(f"出走馬 {len(entries)}頭 を取得しました: {', '.join(entries['馬名'])}")
+
+            # 1頭ずつ過去成績を取得しながら進捗を表示（スマホでも待ち時間が分かるように）
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            all_dfs = []
+            horse_ids = entries["horse_id"].tolist()
+            names = entries["馬名"].tolist()
+
+            for i, (hid, name) in enumerate(zip(horse_ids, names)):
+                status_text.text(f"過去成績を取得中... {name} ({i + 1}/{len(horse_ids)})")
+                try:
+                    df = get_horse_past_results(hid)
+                    all_dfs.append(df)
+                except Exception as e:
+                    st.warning(f"⚠️ {name} の取得に失敗しました: {e}")
+                progress_bar.progress((i + 1) / len(horse_ids))
+                if i < len(horse_ids) - 1:
+                    _time.sleep(WAIT_SECONDS)
+
+            status_text.text("取得完了")
+
+            if not all_dfs:
+                st.error("出走馬の過去成績が1件も取得できませんでした。")
             else:
-                # 取得したデータを compare_times.py 用に整形
+                raw_df = pd.concat(all_dfs, ignore_index=True)
                 compare_df = prepare_for_compare(raw_df)
-                
-                # 指定した距離で比較・ランキング作成
-                result = compare_by_distance(compare_df, distance)
-                
-                if result.empty:
-                    st.info(f"指定された馬の中に、{distance}mを走った記録はありません。")
+
+                if distance_choice == AUTO_LABEL:
+                    result = best_time_per_horse(compare_df)
+                    result = result[["馬名", "距離", "馬場状態", "表示タイム"]].reset_index(drop=True)
+                    if result.empty:
+                        st.info("比較できる過去成績が見つかりませんでした。")
+                    else:
+                        st.success("分析完了！（距離ごとの自己ベスト一覧）")
+                        st.dataframe(result, use_container_width=True)
                 else:
-                    st.success("分析完了！")
-                    # スマホの画面幅に合わせて表を表示
-                    st.dataframe(result, use_container_width=True)
-                    
+                    result = compare_by_distance(compare_df, distance_choice)
+                    if result.empty:
+                        st.info(f"出走馬の中に {distance_choice}mを走った記録がある馬はいません。")
+                    else:
+                        st.success(f"分析完了！（{distance_choice}m 持ちタイムランキング）")
+                        st.dataframe(result, use_container_width=True)
+
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
