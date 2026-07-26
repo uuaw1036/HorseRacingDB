@@ -39,7 +39,6 @@ DISPLAY_COLUMNS = [
     "タイム",
     "上がり3F",
     "馬体重",
-    "脚質",
     "斤量",
     "着順",
 ]
@@ -124,11 +123,18 @@ def build_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, 
     if result.empty:
         return result
 
-    # 過去成績時点の馬番ではなく、今回のレースの馬番に差し替える
-    result = result.drop(columns=["馬番"]).merge(
-        entries[["horse_id", "馬番"]], on="horse_id", how="left"
+    # 過去成績時点の馬番・人気ではなく、今回のレースの馬番・人気に差し替える
+    result = result.drop(columns=["馬番", "人気"]).merge(
+        entries[["horse_id", "馬番", "人気"]], on="horse_id", how="left"
     )
     result = result.drop(columns=["horse_id"])
+
+    # 人気はオッズ未確定の馬がいるとNaNが混ざりfloat化して"1.0"のような
+    # 表示になってしまうため、null許容の整数型(Int64)にしておく。
+    result["人気"] = pd.array(
+        pd.to_numeric(result["人気"], errors="coerce"), dtype="Int64"
+    )
+
     return result[DISPLAY_COLUMNS]
 
 

@@ -129,6 +129,7 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
         # 一般的だが、HTML構造はサイト改修で変わることがあるため、
         # 見つからない場合は行内の最初の数字セルをフォールバックとして使う。
         umaban = None
+        ninki = None
         tr = a.find_parent("tr")
         if tr is not None:
             umaban_cell = tr.select_one("td[class*='Umaban']")
@@ -143,7 +144,17 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
                 if text.isdigit():
                     umaban = int(text)
 
-        seen[horse_id] = {"馬名": name, "馬番": umaban}
+            # このレースでの「人気」も同じ行から取得する。
+            # netkeibaの出馬表では <td class="Popular ..."> に人気順位が入る。
+            # ただしオッズ確定前(発売前)はこのセルが空のことがあるため、
+            # 見つからない/数字でない場合はNoneのままにしておく。
+            ninki_cell = tr.select_one("td[class*='Popular']")
+            if ninki_cell is not None:
+                m = re.search(r"\d+", ninki_cell.get_text(strip=True))
+                if m:
+                    ninki = int(m.group())
+
+        seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
 
     if not seen:
         raise ValueError(
@@ -153,7 +164,7 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
 
     return pd.DataFrame(
         [
-            {"horse_id": hid, "馬名": v["馬名"], "馬番": v["馬番"]}
+            {"horse_id": hid, "馬名": v["馬名"], "馬番": v["馬番"], "人気": v["人気"]}
             for hid, v in seen.items()
         ]
     )
@@ -314,11 +325,22 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
     except ValueError:
         tables = []
 
+    # 「タイム」列を持つテーブルは複数存在することがある(例: ページ上部の
+    # 簡易な近走サマリー表など)。それらは列数が少なく「上り」(上がり3F)や
+    # 「馬体重」を含まないことが多いため、単純に最初に見つかったものを
+    # 使うと上がり3F・馬体重が空になってしまう。
+    # そこで、まず「タイム」に加えて「上り」「馬体重」も含む(=本来の
+    # 全成績テーブルらしい)ものを優先し、それが無ければ列数が最も多い
+    # テーブルを採用する。
+    candidates = [t for t in tables if "タイム" in t.columns]
+
     df = None
-    for t in tables:
-        if "タイム" in t.columns:
+    for t in candidates:
+        if "上り" in t.columns and "馬体重" in t.columns:
             df = t
             break
+    if df is None and candidates:
+        df = max(candidates, key=lambda t: t.shape[1])
 
     if df is None:
         raise ValueError(
