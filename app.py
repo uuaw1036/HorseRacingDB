@@ -383,8 +383,25 @@ def build_table(
     # 環境によってはエラーになったり空欄化されずNoneのような表示が
     # 残ったりする。object型に変換してから空文字で埋めることで確実に
     # 空欄にする。
+    NONE_LIKE_STRINGS = {"None", "none", "NaN", "nan", "<NA>", "NAN", "NA"}
+
     fillna_cols = [c for c in result.columns if c not in SPEED_INDEX_VALUE_COLUMNS]
     result[fillna_cols] = result[fillna_cols].astype(object).fillna("")
+
+    # scrape_netkeiba.py / compare_times.py 側で欠損値がNaNではなく
+    # 文字列"None"や"nan"としてそのまま入ってきているケースがあるため、
+    # それらも念のため空欄に変換しておく(本当のNaNはfillnaで対応済み)。
+    result[fillna_cols] = result[fillna_cols].apply(
+        lambda col: col.map(lambda v: "" if str(v) in NONE_LIKE_STRINGS else v)
+    )
+
+    # 数値フォーマットがかかる列に同様の文字列が紛れていた場合は、
+    # 空文字にすると "{:.1f}".format("") でエラーになるためNaNに戻す。
+    numeric_cols_present = [c for c in SPEED_INDEX_VALUE_COLUMNS if c in result.columns]
+    if numeric_cols_present:
+        result[numeric_cols_present] = result[numeric_cols_present].apply(
+            lambda col: col.map(lambda v: pd.NA if str(v) in NONE_LIKE_STRINGS else v)
+        )
 
     valid_cols = [c for c in display_cols if c in result.columns]
     return result[valid_cols]
