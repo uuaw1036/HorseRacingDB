@@ -487,6 +487,8 @@ elif races_df is not None:
         tab_time, tab_h2h = st.tabs(["🏇 持ちタイム", "🥊 対戦成績"])
 
         with tab_time:
+            st.caption("※ 表右上にある目のアイコンから表示するカラムを変更できます")
+            st.caption("※ スピード指数は過去5走分のデータを使用しており、前日から取得できます")
             pairs_df = (
                 compare_df[["馬場種別", "距離"]]
                 .dropna()
