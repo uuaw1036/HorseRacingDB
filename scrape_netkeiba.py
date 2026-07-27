@@ -194,17 +194,32 @@ def _extract_ninki(tr):
     """
     <tr>から「人気」の値を取得する。
 
-    netkeibaの出馬表テーブルでは、オッズと人気が隣接する2つの<td>に
-    分かれている。
-      - オッズ:  <td class="Popular Txt_R"><span class="Odds_Ninki">4.4</span></td>
-      - 人気:    <td class="Popular Txt_C ...."><span>2</span></td>
-    どちらのclassにも "Popular" が含まれるため、ヘッダー列位置だけで
-    判定するとオッズ側の<td>を人気列と誤認することがある。その場合、
-    オッズの文字列(例 "4.4")から正規表現で最初の数字("4")を拾って
-    しまい、本来の人気("2")とは異なる値になる。
-    これを避けるため、class名で明示的に「オッズ側(Txt_R / Odds_Ninki)」を
-    除外し、「人気側(Txt_C)」の<td>だけを対象にする。
+    netkeibaのページには、人気の持たせ方が少なくとも2パターンある。
+
+    1. 出馬表(shutuba)・地方競馬(nar.netkeiba.com)のパターン:
+       オッズと人気が隣接する2つの<td>に分かれている。
+         - オッズ:  <td class="Popular Txt_R"><span class="Odds_Ninki">4.4</span></td>
+         - 人気:    <td class="Popular Txt_C ...."><span>2</span></td>
+       どちらのclassにも "Popular" が含まれるため、ヘッダー列位置だけで
+       判定するとオッズ側の<td>を人気列と誤認することがある。
+
+    2. 中央競馬の結果ページ(race.netkeiba.com、レース確定後)のパターン:
+       クラス名が "Popular" ではなく "Odds" になっており、人気の値は
+       専用の <span class="OddsPeople">1</span> に入っている。
+         - 人気:  <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
+         - オッズ: <td class="Odds Txt_R"><span class="Odds_Ninki">4.8</span></td>
+
+    "OddsPeople" は人気専用のクラスで他の値と紛れないため、まずこれを
+    最優先で探し、見つからない場合だけパターン1の判定方式にフォールバック
+    する。
     """
+    people_span = tr.find("span", class_="OddsPeople")
+    if people_span is not None:
+        text = people_span.get_text(strip=True)
+        m = re.search(r"\d+", text)
+        if m:
+            return int(m.group())
+
     for td in tr.find_all("td"):
         classes = td.get("class") or []
         if "Popular" not in classes:
@@ -220,22 +235,43 @@ def _extract_ninki(tr):
     return None
 
 
+
 def _extract_umaban(tr):
     """
     <tr>から「馬番」の値を取得する。
 
-    netkeibaの出馬表(shutuba)テーブルでは、各行に "Umaban1"・"Umaban2"…
-    のように馬番の数字を含んだclass名が振られたtdがある
-    (例: <td class="Umaban1">1</td>)。これは中央・地方どちらの
-    shutuba.htmlでも共通のマークアップなので、ヘッダー解析より
-    頑丈な判定材料として使う。
+    netkeibaのページには、馬番の持たせ方が少なくとも2パターンある。
+
+    1. 出馬表(発走前)のパターン:
+         <td class="Umaban1">1</td>
+       のように、馬番の数字を含んだclass名が振られている。
+
+    2. 中央競馬の結果ページ(発走後)のパターン:
+         枠番: <td class="Num Waku3"><div>3</div></td>
+         馬番: <td class="Num Txt_C"><div>3</div></td>
+       "Num"クラスは枠番・馬番どちらのtdにも付き、馬番の数字はclass名では
+       なくtdの中身(text)に入っている。枠番側だけ class名に "WakuN" が
+       含まれるので、それを手がかりに枠番側を除外して馬番側を判定する。
     """
+    # パターン1: 出馬表(発走前)
     for td in tr.find_all("td"):
         classes = td.get("class") or []
         if any(c.startswith("Umaban") for c in classes):
             text = td.get_text(strip=True)
             if text.isdigit():
                 return int(text)
+
+    # パターン2: 結果ページ(発走後)
+    for td in tr.find_all("td"):
+        classes = td.get("class") or []
+        if "Num" not in classes:
+            continue
+        if any(c.startswith("Waku") for c in classes):
+            continue  # 枠番側のtdはスキップ
+        text = td.get_text(strip=True)
+        if text.isdigit():
+            return int(text)
+
     return None
 
 
@@ -723,9 +759,11 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
             break
 
     if umaban_row is None or data_tbody is None:
+        snippet = re.sub(r"\s+", " ", html).strip()[:300]
         raise ValueError(
             "jiro8ページから「馬番」行が見つかりませんでした。"
-            "ページ構造が変わっている可能性があります。"
+            "ページ構造が変わっているか、レースがjiro8に無い可能性があります。"
+            f"\n取得できた内容の先頭: {snippet!r}"
         )
 
     umaban_list = []
