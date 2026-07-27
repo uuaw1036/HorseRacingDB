@@ -40,7 +40,7 @@ HEADERS = {
 }
 
 # リクエスト間の待機秒数(サーバー負荷軽減のため。短くしすぎない)
-WAIT_SECONDS = 1.5
+WAIT_SECONDS = 1.0
 
 
 def _clean_header_cell_text(th) -> str:
