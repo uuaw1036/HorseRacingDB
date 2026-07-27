@@ -315,7 +315,6 @@ def build_table(
     venue: str = None,
     speed_df: pd.DataFrame = None,
     central: bool = True,
-    result = result.fillna("").replace(["None", "none", "NaN", "nan"], "")
 ):
     """
     compare_df から指定の距離・馬場種別のランキングを作り、
