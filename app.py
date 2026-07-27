@@ -49,16 +49,6 @@ DISPLAY_COLUMNS = [
 ]
 
 # --- セッション状態の初期化 -------------------------------------------
-# race_list_df: 選択した開催日のレース候補一覧
-# compare_df / compare_entries / compare_race_id: 一度取得した出走馬の
-#   持ちタイムデータ。距離の切り替えはここから再計算するだけにして、
-#   スクレイピングを何度も走らせないようにする。
-# raw_df: 各出走馬の過去成績の生データ(persist_for_compare前)。
-#   対戦成績(馬同士の勝敗)機能で使う。持ちタイム取得時に一度スクレイピング
-#   したデータをそのまま再利用し、対戦成績のためだけの追加スクレイピングは
-#   行わない。
-# speed_index_df: jiro8サイトから取得した、出走馬ごとの過去5走分の
-#   スピード指数(平均指数・最高指数)。持ちタイム表の一番右に表示する。
 for key in [
     "race_list_df",
     "compare_df",
@@ -105,8 +95,6 @@ def fetch_compare_data(race_id: str, central: bool = True):
     raw_df = pd.concat(all_dfs, ignore_index=True)
     compare_df = prepare_for_compare(raw_df)
 
-    # jiro8は中央競馬のレースしか扱っていないサイトのため、地方競馬のときは
-    # そもそも取得を試みない(取得しても対応ページが無くエラーになるだけのため)。
     if central:
         with st.spinner("スピード指数(jiro8)を取得中..."):
             try:
@@ -126,13 +114,6 @@ def fetch_compare_data(race_id: str, central: bool = True):
 
 
 def _style_column(df: pd.DataFrame, column: str, color_map: dict):
-    """指定した列だけをセル単位で色分けするStyler。
-
-    pandas 2.1でStyler.applymap()は非推奨となり、後のバージョンでは
-    Styler.map()に置き換わっている(環境によってはapplymapがもう存在しない)。
-    両方のpandasバージョンで動くよう、mapがあればそちらを使う。
-    """
-
     def _color(val):
         color = color_map.get(val)
         return f"background-color: {color}" if color else ""
@@ -144,8 +125,6 @@ def _style_column(df: pd.DataFrame, column: str, color_map: dict):
 
 
 def style_by_ninki(df: pd.DataFrame):
-    """人気列だけをセル単位で色分けするStyler。"""
-
     def _color(val):
         try:
             v = int(val)
@@ -160,16 +139,27 @@ def style_by_ninki(df: pd.DataFrame):
     return styler.applymap(_color, subset=["人気"])
 
 
+def _rank_top3_colors(values: pd.Series, ascending: bool) -> pd.Series:
+    """
+    values を順位付けし、1〜3位に対応する背景色(人気と同じ配色)を、
+    元の行位置(index)を保ったままSeriesとして返す(4位以下・NaNは空文字)。
+    """
+    numeric = pd.to_numeric(values, errors="coerce")
+    ranks = numeric.rank(method="min", ascending=ascending)
+
+    def _color(rank):
+        if pd.isna(rank) or int(rank) not in NINKI_COLORS:
+            return ""
+        return f"background-color: {NINKI_COLORS[int(rank)]}"
+
+    return ranks.apply(_color)
+
+
 def speed_index_rank_colors(speed_df: pd.DataFrame):
     """
     speed_df (レース出走馬全体分の 馬番・平均指数・最高指数) を元に、
     レース全体で見た平均指数・最高指数の1〜3位を計算し、
     馬番 -> 背景色 の対応表 (dict) を返す ((平均指数用, 最高指数用) のタプル)。
-
-    表(距離・馬場種別ごとの持ちタイムランキング)は、その距離・馬場種別を
-    走ったことのある馬だけの部分集合になるため、表内だけで順位を計算すると
-    同じ馬でも表によって色が変わってしまう。それを避けるため、必ず
-    「このレースに出走する馬全体」を母集団にして順位を固定する。
     """
     empty = ({}, {})
     if speed_df is None or speed_df.empty:
@@ -195,13 +185,6 @@ def speed_index_rank_colors(speed_df: pd.DataFrame):
 def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_max_colors: dict = None):
     """
     持ちタイム比較表に色付けを行うStyler。
-    - 人気: 1〜3位のセルに色付け(値そのものが順位)
-    - タイム・上がり3F: 表内(=この距離・馬場種別を走ったことのある馬同士)で
-      速い順に1〜3位のセルに色付け
-      (タイムは表示用の文字列"1:33.4"のため、順位判定だけ秒数に変換する)
-    - 平均指数・最高指数: 表内の順位ではなく、レースに出走する馬全体の中で
-      高い順に1〜3位のセルに色付け(speed_index_rank_colors()で事前計算した
-      馬番 -> 色の対応表をそのまま参照する。あわせて小数第2位までの表示に揃える)
     """
     speed_avg_colors = speed_avg_colors or {}
     speed_max_colors = speed_max_colors or {}
@@ -243,10 +226,6 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
 
 
 def style_by_yuretsu(df: pd.DataFrame):
-    """優劣列だけをセル単位で色分けするStyler。
-
-    優(勝ち越し)は人気3位と同じ色、劣(負け越し)は人気2位と同じ色を使う。
-    """
     yuretsu_colors = {
         "優": NINKI_COLORS[3],
         "劣": NINKI_COLORS[2],
@@ -262,19 +241,6 @@ def build_table(
     venue: str = None,
     speed_df: pd.DataFrame = None,
 ):
-    """
-    compare_df から指定の距離・馬場種別のランキングを作り、
-    現在のレースの馬番(entriesの馬番)に差し替えて返す。
-
-    venue を指定した場合は、さらに「場」列(過去成績を記録したレースの
-    競馬場)がそのvenueと一致する行だけに絞り込む(=このレースと同じ
-    競馬場での持ちタイムだけを見たい場合に使う)。
-
-    speed_df を指定した場合は、jiro8サイトから取得した「馬番」ごとの
-    平均指数・最高指数を持ちタイム表にマージする(このレースに対応する
-    スピード指数が取得できていない場合はNoneのままでよく、その場合は
-    平均指数・最高指数の列は空欄になる)。
-    """
     result = compare_by_distance(compare_df, distance, surface)
     if result.empty:
         return result
@@ -283,28 +249,19 @@ def build_table(
         result = result[result["場"] == venue]
         if result.empty:
             return result
-        # compare_by_distance()の時点でタイム昇順に並んでおり、
-        # boolean条件での絞り込みでもその順序は保たれるため、
-        # インデックスを振り直すだけでよい。
         result = result.reset_index(drop=True)
 
-    # 過去成績時点の馬番・人気ではなく、今回のレースの馬番・人気に差し替える
     result = result.drop(columns=["馬番", "人気"]).merge(
         entries[["horse_id", "馬番", "人気"]], on="horse_id", how="left"
     )
     result = result.drop(columns=["horse_id"])
 
-    # 人気はオッズ未確定の馬がいるとNaNが混ざりfloat化して"1.0"のような
-    # 表示になってしまうため、null許容の整数型(Int64)にしておく。
     result["人気"] = pd.array(
         pd.to_numeric(result["人気"], errors="coerce"), dtype="Int64"
     )
 
-    # jiro8のスピード指数(平均指数・最高指数)を馬番でマージする
     if speed_df is not None and not speed_df.empty:
         speed_df = speed_df.copy()
-        # result側の馬番はInt64(null許容)なのに対し、speed_df側は通常のint64のまま。
-        # 型が違うとpandasのバージョンによってはmerge時にValueErrorになるため揃える。
         speed_df["馬番"] = pd.array(
             pd.to_numeric(speed_df["馬番"], errors="coerce"), dtype="Int64"
         )
@@ -324,7 +281,6 @@ def render_result_table(
     venue: str = None,
     speed_df: pd.DataFrame = None,
 ):
-    """セッションに保存済みのデータから、選択された距離・馬場種別のテーブルだけを表示する(再取得なし)。"""
     result = build_table(compare_df, entries, distance, surface, venue=venue, speed_df=speed_df)
     if result.empty:
         where = f"{venue}の{surface}{distance}m" if venue else f"{surface}{distance}m"
@@ -342,7 +298,6 @@ def render_result_table(
 
 
 def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
-    """出走予定馬同士の対戦成績を表示する(持ちタイム取得時のデータを再利用。追加スクレイピングなし)。"""
     st.subheader("🥊 出走馬同士の対戦成績")
 
     entries_sorted = entries.sort_values("馬番", na_position="last")
@@ -421,13 +376,10 @@ elif races_df is not None:
 
     races_df = races_df.copy()
 
-    # --- 1a. まず開催場所を選ぶ -----------------------------------------
     venues = [v for v in races_df["開催"].tolist() if v]
-    # 順序を保ったまま重複を除く
     venues = list(dict.fromkeys(venues))
 
     if not venues:
-        # 開催場所の情報が取れなかった場合は、従来通り全レースから直接選ぶ
         races_df["表示名"] = races_df.apply(
             lambda r: " / ".join(
                 p
@@ -444,9 +396,6 @@ elif races_df is not None:
         venue_races = races_df.loc[races_df["開催"] == chosen_venue].copy()
         venue_races["表示名"] = venue_races.apply(_race_label, axis=1)
 
-        # --- 1b. 次にその開催場所の中からレース(R)を選ぶ -----------------
-        # key に開催場所を含めることで、開催場所を切り替えたときに
-        # 前の開催場所での選択が残ってエラーになるのを防ぐ。
         choice_label = st.selectbox(
             "レースを選択",
             venue_races["表示名"].tolist(),
@@ -457,22 +406,12 @@ elif races_df is not None:
     chosen_row = venue_races.iloc[0]
     chosen_race_id = chosen_row["race_id"]
 
-    # レース一覧に載っている「芝1800m」のような表記から、このレース自体の
-    # 馬場種別・距離を求めておく(取得後、デフォルトで表示する距離に使う)。
     race_surface, race_distance = parse_distance_column(chosen_row.get("距離", ""))
-
-    # 「2回 福島 3日目」のような開催名から競馬場名だけを抽出しておく
-    # (過去成績側の「場」列と突き合わせて絞り込むために使う)。
     race_venue_clean = parse_venue_name(chosen_row.get("開催", "")) or None
 
-    # --- 2. 出走馬の持ちタイムを取得(スクレイピングはここだけ) ---------
     if st.button("このレースの出走馬の情報を取得", use_container_width=True, key="fetch"):
         fetch_compare_data(chosen_race_id, central=is_central)
 
-    # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
-    # 別のレースを選んでも、再取得ボタンを押すまでは前回取得したデータを
-    # そのまま表示し続ける(選択中のレースと取得済みデータのレースが
-    # 異なる場合はその旨だけ注記する)。
     if st.session_state.compare_df is not None:
         compare_df = st.session_state.compare_df
         entries = st.session_state.compare_entries
@@ -502,7 +441,6 @@ elif races_df is not None:
             else:
                 labels = [f"{s}{d}m" for s, d in available_pairs]
 
-                # デフォルトはこのレース自体の馬場種別・距離。データが無ければ先頭を使う。
                 default_index = 0
                 if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
                     default_index = available_pairs.index((race_surface, race_distance))
@@ -514,10 +452,6 @@ elif races_df is not None:
 
                 render_result_table(compare_df, entries, distance_choice, surface_choice, speed_df=speed_df)
 
-            # このレース自体の馬場種別・距離・競馬場に固定した表を、選択式の
-            # 表とは別にもう一つ、常に表示しておく(上のセレクトボックスで
-            # 別の距離を選んでいても、このレースの条件は常に見えるように
-            # する)。「場」もこのレースの競馬場と同じものだけに絞り込む。
             st.markdown("#### 📍 このレースの条件での持ちタイム")
             if race_surface and race_distance:
                 render_result_table(
