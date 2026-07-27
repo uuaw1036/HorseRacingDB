@@ -759,10 +759,19 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
             break
 
     if umaban_row is None or data_tbody is None:
+        title_tag = soup.find("title")
+        title_text = title_tag.get_text(strip=True) if title_tag else "(titleタグなし)"
+        full_text = soup.get_text()
+        umaban_anywhere = "馬番" in full_text
         snippet = re.sub(r"\s+", " ", html).strip()[:300]
         raise ValueError(
             "jiro8ページから「馬番」行が見つかりませんでした。"
-            "ページ構造が変わっているか、レースがjiro8に無い可能性があります。"
+            f"ページタイトル: {title_text!r} / "
+            f"ページ内のどこかに「馬番」という文字列があるか: {umaban_anywhere}\n"
+            "「馬番」がどこにも無い場合は、そのcode(race_id)のレースが"
+            "jiro8に登録されていない(まだレース当日ではない/対象外のレース)か、"
+            "サイト側でエラーページが返っている可能性が高いです。"
+            "ある場合はテーブルの行構成自体が変わった可能性があります。"
             f"\n取得できた内容の先頭: {snippet!r}"
         )
 
@@ -858,7 +867,10 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
     response = requests.get(url, headers=HEADERS)
     response.raise_for_status()
     html = _decode_jiro8_response(response)
-    return _parse_jiro8_speed_index(html)
+    try:
+        return _parse_jiro8_speed_index(html)
+    except ValueError as e:
+        raise ValueError(f"{e}\nURL: {url}") from e
 
 
 def get_multiple_horses(horse_ids: list) -> pd.DataFrame:
