@@ -62,7 +62,7 @@ def fetch_compare_data(race_id: str):
     with st.spinner("出走馬一覧を取得中..."):
         entries = get_race_entries(race_id)
 
-    st.success(f"出走馬 {len(entries)}頭 を取得しました: {', '.join(entries['馬名'])}")
+    st.success(f"出走馬 {len(entries)}頭 を取得しました。")
 
     progress_bar = st.progress(0.0)
     status_text = st.empty()
