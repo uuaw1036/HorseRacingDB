@@ -273,6 +273,12 @@ def build_table(
 
     # jiro8のスピード指数(平均指数・最高指数)を馬番でマージする
     if speed_df is not None and not speed_df.empty:
+        speed_df = speed_df.copy()
+        # result側の馬番はInt64(null許容)なのに対し、speed_df側は通常のint64のまま。
+        # 型が違うとpandasのバージョンによってはmerge時にValueErrorになるため揃える。
+        speed_df["馬番"] = pd.array(
+            pd.to_numeric(speed_df["馬番"], errors="coerce"), dtype="Int64"
+        )
         result = result.merge(speed_df[["馬番", "平均指数", "最高指数"]], on="馬番", how="left")
     else:
         result["平均指数"] = pd.NA
