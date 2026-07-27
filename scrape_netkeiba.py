@@ -272,6 +272,76 @@ def _extract_umaban(tr):
     return None
 
 
+def get_win_odds_ninki(race_id: str, central: bool = True) -> pd.DataFrame:
+    """
+    単勝オッズ・人気を専用APIから取得する(馬番, 単勝オッズ, 人気)。
+
+    出馬表ページ(shutuba.html)の人気・オッズ欄は、静的HTMLには
+    空のプレースホルダー("**"など)しか入っておらず、ブラウザ上で
+    JavaScriptがこのAPIを叩いてDOMに書き込んで表示している。そのため
+    requestsで静的HTMLを取得しただけでは値が取れない。このAPIを
+    直接叩くことで、JSを実行せずに実際のオッズ・人気を取得できる。
+
+    URL: https://race.netkeiba.com/api/api_get_jra_odds.html
+         ?race_id={race_id}&type=1&action=init
+      (type=1 が単勝オッズ。動作確認済み。)
+
+    レスポンス例:
+      {"status":"yoso","data":{"odds":{"1":{"12":["1.9","","1"], ...}}}, ...}
+      外側の"1"は券種(1=単勝)固定。内側のキーが馬番(文字列)、値が
+      [オッズ, (未使用/複勝オッズ枠?), 人気] の3要素配列になっている。
+
+    central: True なら中央競馬(race.netkeiba.com)。地方競馬(nar)側の
+             同等APIは未検証のため、Falseの場合は呼び出さず空のDataFrameを返す。
+    ※ オッズ発表前・レース確定後などでデータが無い場合は
+      status が "NG" になるので、その場合も空のDataFrameを返す
+      (エラーにはしない。呼び出し側は静的HTML側の値をそのまま使えばよい)。
+    """
+    empty = pd.DataFrame(columns=["馬番", "単勝オッズ", "人気"])
+    if not central:
+        return empty
+
+    url = (
+        "https://race.netkeiba.com/api/api_get_jra_odds.html"
+        f"?race_id={race_id}&type=1&action=init"
+    )
+    headers = dict(HEADERS)
+    headers["Referer"] = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
+    headers["X-Requested-With"] = "XMLHttpRequest"
+
+    response = requests.get(url, headers=headers, timeout=10)
+    response.raise_for_status()
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return empty
+
+    odds_by_umaban = payload.get("data", {}).get("odds", {}).get("1", {})
+    if not odds_by_umaban:
+        return empty
+
+    records = []
+    for umaban_str, values in odds_by_umaban.items():
+        if not str(umaban_str).isdigit():
+            continue
+        odds_str = values[0] if len(values) > 0 else ""
+        ninki_str = values[2] if len(values) > 2 else ""
+        try:
+            odds = float(odds_str) if odds_str else None
+        except ValueError:
+            odds = None
+        try:
+            ninki = int(ninki_str) if ninki_str else None
+        except ValueError:
+            ninki = None
+        records.append({"馬番": int(umaban_str), "単勝オッズ": odds, "人気": ninki})
+
+    if not records:
+        return empty
+    return pd.DataFrame(records).sort_values("馬番").reset_index(drop=True)
+
+
 def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
     """
     レースの出馬表(発走前)または結果(発走後にこのページを見た場合)の
@@ -412,12 +482,36 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
             "race_idが正しいか、レースがまだ発表されていない可能性があります。"
         )
 
-    return pd.DataFrame(
+    df = pd.DataFrame(
         [
             {"horse_id": hid, "馬名": v["馬名"], "馬番": v["馬番"], "人気": v["人気"]}
             for hid, v in seen.items()
         ]
     )
+
+    # 静的HTMLには人気がJSで後から埋め込まれる場合があり(この場合は
+    # 全行が空欄になる)、そのときは専用オッズAPIから取り直して埋める。
+    # 馬番は静的HTML側で取得できている前提(馬番自体はJS埋め込みではない)。
+    if central and df["人気"].isna().all():
+        try:
+            odds_df = get_win_odds_ninki(race_id, central=central)
+        except requests.RequestException:
+            odds_df = pd.DataFrame(columns=["馬番", "単勝オッズ", "人気"])
+
+        if not odds_df.empty:
+            # 型が違うとmerge時にValueErrorになることがあるため、
+            # 両方とも null許容の Int64 に揃えてからマージする。
+            df = df.copy()
+            df["馬番"] = pd.array(pd.to_numeric(df["馬番"], errors="coerce"), dtype="Int64")
+            odds_df = odds_df.copy()
+            odds_df["馬番"] = pd.array(
+                pd.to_numeric(odds_df["馬番"], errors="coerce"), dtype="Int64"
+            )
+            df = df.drop(columns=["人気"]).merge(
+                odds_df[["馬番", "人気"]], on="馬番", how="left"
+            )
+
+    return df
 
 
 def get_race_list(date: str, central: bool = True) -> pd.DataFrame:
