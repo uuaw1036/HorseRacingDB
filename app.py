@@ -375,7 +375,12 @@ def build_table(
             if col in result.columns:
                 result = result.drop(columns=[col])
 
-    result = result.fillna("")
+    # 平均指数・最高指数・前走〜5走前は style_result_table 側で
+    # "{:.1f}"等の数値フォーマット(na_rep="")を適用するため、
+    # ここで空文字に変換すると "{:.1f}".format("") がエラーになる。
+    # そのためこれらの列はNaNのまま残し、それ以外の列だけ空欄化する。
+    fillna_cols = [c for c in result.columns if c not in SPEED_INDEX_VALUE_COLUMNS]
+    result[fillna_cols] = result[fillna_cols].fillna("")
 
     valid_cols = [c for c in display_cols if c in result.columns]
     return result[valid_cols]
