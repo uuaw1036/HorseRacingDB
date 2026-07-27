@@ -105,12 +105,18 @@ def fetch_compare_data(race_id: str, central: bool = True):
     raw_df = pd.concat(all_dfs, ignore_index=True)
     compare_df = prepare_for_compare(raw_df)
 
-    with st.spinner("スピード指数(jiro8)を取得中..."):
-        try:
-            speed_index_df = get_speed_index_by_umaban(race_id)
-        except Exception as e:
-            st.warning(f"⚠️ スピード指数の取得に失敗しました: {e}")
-            speed_index_df = pd.DataFrame(columns=["馬番", "平均指数", "最高指数"])
+    # jiro8は中央競馬のレースしか扱っていないサイトのため、地方競馬のときは
+    # そもそも取得を試みない(取得しても対応ページが無くエラーになるだけのため)。
+    if central:
+        with st.spinner("スピード指数(jiro8)を取得中..."):
+            try:
+                speed_index_df = get_speed_index_by_umaban(race_id)
+            except Exception as e:
+                st.warning(f"⚠️ スピード指数の取得に失敗しました: {e}")
+                speed_index_df = pd.DataFrame(columns=["馬番", "平均指数", "最高指数"])
+    else:
+        st.caption("※ スピード指数(jiro8)は中央競馬のみ対応のため、地方競馬では取得しません。")
+        speed_index_df = pd.DataFrame(columns=["馬番", "平均指数", "最高指数"])
 
     st.session_state.compare_df = compare_df
     st.session_state.compare_entries = entries

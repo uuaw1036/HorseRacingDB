@@ -220,6 +220,25 @@ def _extract_ninki(tr):
     return None
 
 
+def _extract_umaban(tr):
+    """
+    <tr>から「馬番」の値を取得する。
+
+    netkeibaの出馬表(shutuba)テーブルでは、各行に "Umaban1"・"Umaban2"…
+    のように馬番の数字を含んだclass名が振られたtdがある
+    (例: <td class="Umaban1">1</td>)。これは中央・地方どちらの
+    shutuba.htmlでも共通のマークアップなので、ヘッダー解析より
+    頑丈な判定材料として使う。
+    """
+    for td in tr.find_all("td"):
+        classes = td.get("class") or []
+        if any(c.startswith("Umaban") for c in classes):
+            text = td.get_text(strip=True)
+            if text.isdigit():
+                return int(text)
+    return None
+
+
 def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
     """
     レースの出馬表(発走前)または結果(発走後にこのページを見た場合)の
@@ -235,9 +254,11 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
     後ろの数字部分をコピーする(例: race_id=202506050812)。
 
     ※ このページは発走前は出馬表、発走後は結果(着順・タイム・人気など)が
-      そのまま表示されることがあり、CSSクラス名も微妙に異なる。クラス名に
-      依存せず、テーブルの見出し(<thead>)から「馬番」「人気」列の位置を
-      都度判定して抽出することで、両方のケースや中央/地方の違いに対応する。
+      そのまま表示されることがあり、CSSクラス名も微妙に異なる。まずは
+      出走馬1頭ごとに振られる <tr class="HorseList"> という行クラス
+      (中央・地方どちらのshutuba.htmlでも共通)を頼りに抽出し、それが
+      1件も見つからない場合だけ、テーブルの見出し(<thead>)から
+      「馬番」列の位置を判定する方式にフォールバックする。
     """
     domain = "race.netkeiba.com" if central else "nar.netkeiba.com"
     url = f"https://{domain}/race/shutuba.html?race_id={race_id}"
@@ -247,25 +268,15 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    # 「馬番」列を持つテーブルを探し、そのヘッダーから列位置を判定する
-    target_table = None
-    header_texts = []
-    for t in soup.find_all("table"):
-        thead = t.find("thead")
-        if thead is None or thead.find("tr") is None:
-            continue
-        texts = [_clean_header_cell_text(th) for th in thead.find("tr").find_all("th")]
-        if "馬番" in texts:
-            target_table = t
-            header_texts = texts
-            break
-
-    umaban_idx = header_texts.index("馬番") if "馬番" in header_texts else None
-
     seen = {}
 
-    tbody = target_table.find("tbody") if target_table is not None else None
-    for tr in (tbody.find_all("tr") if tbody is not None else []):
+    # --- 1) <tr class="HorseList"> 行から直接抽出する(最優先) ---------
+    # ヘッダー(<thead>)の文言やテーブル構成に左右されないため、
+    # サイト側の見出しラベルが変わっても壊れにくい。
+    horse_list_rows = [
+        tr for tr in soup.find_all("tr") if "HorseList" in (tr.get("class") or [])
+    ]
+    for tr in horse_list_rows:
         a = tr.find("a", href=re.compile(r"/horse/\d{8,12}"))
         if a is None:
             continue
@@ -279,16 +290,54 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
         if not name:
             continue
 
-        tds = tr.find_all("td")
-        umaban = None
-        if umaban_idx is not None and umaban_idx < len(tds):
-            text = tds[umaban_idx].get_text(strip=True)
-            if text.isdigit():
-                umaban = int(text)
+        seen[horse_id] = {
+            "馬名": name,
+            "馬番": _extract_umaban(tr),
+            "人気": _extract_ninki(tr),
+        }
 
-        ninki = _extract_ninki(tr)
+    # --- 2) 上でうまく取れなかった場合、「馬番」列を持つテーブルを探し、 ---
+    # そのヘッダーから列位置を判定する方式にフォールバックする。
+    if not seen:
+        target_table = None
+        header_texts = []
+        for t in soup.find_all("table"):
+            thead = t.find("thead")
+            if thead is None or thead.find("tr") is None:
+                continue
+            texts = [_clean_header_cell_text(th) for th in thead.find("tr").find_all("th")]
+            if "馬番" in texts:
+                target_table = t
+                header_texts = texts
+                break
 
-        seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
+        umaban_idx = header_texts.index("馬番") if "馬番" in header_texts else None
+
+        tbody = target_table.find("tbody") if target_table is not None else None
+        for tr in (tbody.find_all("tr") if tbody is not None else []):
+            a = tr.find("a", href=re.compile(r"/horse/\d{8,12}"))
+            if a is None:
+                continue
+            m = re.search(r"/horse/(\d{8,12})/?(?:[\"?]|$)", a["href"])
+            if not m:
+                continue
+            horse_id = m.group(1)
+            if horse_id in seen:
+                continue
+            name = a.get("title") or a.text.strip()
+            if not name:
+                continue
+
+            tds = tr.find_all("td")
+            umaban = None
+            if umaban_idx is not None and umaban_idx < len(tds):
+                text = tds[umaban_idx].get_text(strip=True)
+                if text.isdigit():
+                    umaban = int(text)
+
+            ninki = _extract_ninki(tr)
+
+            seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
 
     # --- テーブルからの構造化抽出がうまくいかなかった場合のフォールバック ---
     # (ページ構造が想定と大きく異なる場合の保険。クラス名頼みの旧方式)
@@ -724,6 +773,35 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+# jiro8はHTTPヘッダー/meta共にcharset指定が曖昧なため、requestsの
+# apparent_encoding(chardetによる自動判定)がShift_JIS系のページを
+# 誤ってEUC-JPなどと判定し、「馬番」などの文字列が文字化けして
+# 一致しなくなることがある。判定に頼らず、実際に「馬番」という文字列が
+# 正しくデコードできる候補を順番に試す。
+JIRO8_ENCODING_CANDIDATES = ["cp932", "shift_jis", "euc-jp", "utf-8"]
+
+
+def _decode_jiro8_response(response) -> str:
+    """
+    jiro8のレスポンスを、候補の文字コードを順に試してデコードする。
+    「馬番」という文字列が実際に含まれている結果を採用する。
+    どれを試しても見つからない場合は、最初にデコードに成功したものを
+    (文字化けのままでも)返す。呼び出し元でエラーメッセージを出す。
+    """
+    raw = response.content
+    fallback_text = None
+    for enc in JIRO8_ENCODING_CANDIDATES:
+        try:
+            text = raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if fallback_text is None:
+            fallback_text = text
+        if "馬番" in text:
+            return text
+    return fallback_text if fallback_text is not None else response.text
+
+
 def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
     """
     jiro8サイトから対象レースの各馬(馬番)の過去5走分の「スピード指数」を
@@ -731,13 +809,18 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
 
     race_id: netkeibaのレースID(例: "202609030611")。先頭の"20"を除いた
              ものがjiro8のURLパラメータ code になる。
+
+    ※ jiro8は中央競馬のレースしか扱っていないサイトのため、地方競馬の
+      race_id を渡すと対応ページが存在せず「馬番」行が見つからずに
+      失敗する。中央競馬かどうかの判定は呼び出し側(app.py)で行い、
+      地方競馬の場合はそもそもこの関数を呼ばないようにすること。
     """
     code = race_id_to_jiro8_code(race_id)
     url = f"{JIRO8_BASE_URL}?code={code}"
     response = requests.get(url, headers=HEADERS)
     response.raise_for_status()
-    response.encoding = response.apparent_encoding or "utf-8"
-    return _parse_jiro8_speed_index(response.text)
+    html = _decode_jiro8_response(response)
+    return _parse_jiro8_speed_index(html)
 
 
 def get_multiple_horses(horse_ids: list) -> pd.DataFrame:
