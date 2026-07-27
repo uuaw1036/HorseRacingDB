@@ -69,6 +69,41 @@ NAR_DISPLAY_COLUMNS = [
 
 SPEED_INDEX_VALUE_COLUMNS = ["平均指数", "最高指数", "前走", "2走前", "3走前", "4走前", "5走前"]
 
+# 欠損値が本物のNaN/Noneではなく、文字列化された"None"/"nan"等として
+# そのまま入ってきてしまっているケース向けの判定セット。
+NONE_LIKE_STRINGS = {"None", "none", "NaN", "nan", "<NA>", "NAN", "NA"}
+
+
+def blank_missing(df: pd.DataFrame, exclude_cols=None) -> pd.DataFrame:
+    """
+    表示用DataFrameの欠損値をすべて空文字に変換して返す(表示上、セルが
+    Noneのままになるのを防ぐための共通処理)。対象は以下の3パターン:
+      - 本物のNaN / None / pandasのpd.NA
+      - それらが文字列化されてしまった "None" / "nan" / "<NA>" など
+
+    exclude_cols には、この後 Styler.format() で "{:.1f}" のような数値
+    フォーマットを当てる列を指定する。空文字にすると format 時にエラーに
+    なるため、そうした列だけは空文字にせずNaN(pd.NA)のまま残す
+    (na_rep="" 側で最終的に空欄表示にする)。
+    """
+    df = df.copy()
+    exclude_cols = set(exclude_cols or [])
+    target_cols = [c for c in df.columns if c not in exclude_cols]
+
+    if target_cols:
+        df[target_cols] = df[target_cols].astype(object).fillna("")
+        df[target_cols] = df[target_cols].apply(
+            lambda col: col.map(lambda v: "" if str(v) in NONE_LIKE_STRINGS else v)
+        )
+
+    numeric_cols_present = [c for c in exclude_cols if c in df.columns]
+    if numeric_cols_present:
+        df[numeric_cols_present] = df[numeric_cols_present].apply(
+            lambda col: col.map(lambda v: pd.NA if str(v) in NONE_LIKE_STRINGS else v)
+        )
+
+    return df
+
 # --- セッション状態の初期化 -------------------------------------------
 # race_list_df: 選択した開催日のレース候補一覧
 # compare_df / compare_entries / compare_race_id: 一度取得した出走馬の
@@ -378,30 +413,8 @@ def build_table(
     # 平均指数・最高指数・前走〜5走前は style_result_table 側で
     # "{:.1f}"等の数値フォーマット(na_rep="")を適用するため、
     # ここで空文字に変換すると "{:.1f}".format("") がエラーになる。
-    # そのためこれらの列はNaNのまま残し、それ以外の列だけ空欄化する。
-    # 「人気」はInt64(null許容整数)型のため、そのままfillna("")すると
-    # 環境によってはエラーになったり空欄化されずNoneのような表示が
-    # 残ったりする。object型に変換してから空文字で埋めることで確実に
-    # 空欄にする。
-    NONE_LIKE_STRINGS = {"None", "none", "NaN", "nan", "<NA>", "NAN", "NA"}
-
-    fillna_cols = [c for c in result.columns if c not in SPEED_INDEX_VALUE_COLUMNS]
-    result[fillna_cols] = result[fillna_cols].astype(object).fillna("")
-
-    # scrape_netkeiba.py / compare_times.py 側で欠損値がNaNではなく
-    # 文字列"None"や"nan"としてそのまま入ってきているケースがあるため、
-    # それらも念のため空欄に変換しておく(本当のNaNはfillnaで対応済み)。
-    result[fillna_cols] = result[fillna_cols].apply(
-        lambda col: col.map(lambda v: "" if str(v) in NONE_LIKE_STRINGS else v)
-    )
-
-    # 数値フォーマットがかかる列に同様の文字列が紛れていた場合は、
-    # 空文字にすると "{:.1f}".format("") でエラーになるためNaNに戻す。
-    numeric_cols_present = [c for c in SPEED_INDEX_VALUE_COLUMNS if c in result.columns]
-    if numeric_cols_present:
-        result[numeric_cols_present] = result[numeric_cols_present].apply(
-            lambda col: col.map(lambda v: pd.NA if str(v) in NONE_LIKE_STRINGS else v)
-        )
+    # そのためこれらの列だけ除外して blank_missing() をかける。
+    result = blank_missing(result, exclude_cols=SPEED_INDEX_VALUE_COLUMNS)
 
     valid_cols = [c for c in display_cols if c in result.columns]
     return result[valid_cols]
@@ -454,6 +467,9 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
     if summary_df.empty:
         st.info(f"{selected_name} が他の出走予定馬と同じレースに出走した記録は見つかりませんでした。")
         return
+
+    summary_df = blank_missing(summary_df, exclude_cols=["馬番"])
+    detail_df = blank_missing(detail_df, exclude_cols=["馬番"])
 
     st.write(f"**{selected_name}** と過去に同じレースに出走したことのある出走予定馬との対戦成績:")
     st.dataframe(
