@@ -196,22 +196,21 @@ def _extract_ninki(tr):
 
     netkeibaのページには、人気の持たせ方が少なくとも2パターンある。
 
-    1. 出馬表(shutuba)・地方競馬(nar.netkeiba.com)のパターン:
-       オッズと人気が隣接する2つの<td>に分かれている。
-         - オッズ:  <td class="Popular Txt_R"><span class="Odds_Ninki">4.4</span></td>
-         - 人気:    <td class="Popular Txt_C ...."><span>2</span></td>
-       どちらのclassにも "Popular" が含まれるため、ヘッダー列位置だけで
-       判定するとオッズ側の<td>を人気列と誤認することがある。
+    1. 中央競馬の出馬表(shutuba.html)のパターン:
+       人気のセルには "Popular_Ninki" という専用クラスが付いており、
+       中の<span>にそのまま数字が入っている。
+         <td class="Popular Popular_Ninki Txt_C"><span id="ninki-1_17">11</span></td>
+       オッズのセルは同じ "Popular" クラスを持つが "Popular_Ninki" は付かない
+       (例: <td class="Txt_R Popular"><span ...>34.4</span></td>)ため、
+       "Popular_Ninki" の有無で確実に区別できる。
 
     2. 中央競馬の結果ページ(race.netkeiba.com、レース確定後)のパターン:
-       クラス名が "Popular" ではなく "Odds" になっており、人気の値は
-       専用の <span class="OddsPeople">1</span> に入っている。
-         - 人気:  <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
-         - オッズ: <td class="Odds Txt_R"><span class="Odds_Ninki">4.8</span></td>
+       人気の値は専用の <span class="OddsPeople">1</span> に入っている。
+         <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
 
-    "OddsPeople" は人気専用のクラスで他の値と紛れないため、まずこれを
-    最優先で探し、見つからない場合だけパターン1の判定方式にフォールバック
-    する。
+    "OddsPeople" と "Popular_Ninki" はどちらも人気専用の目印で他の値と
+    紛れないため、まず "OddsPeople" を最優先で探し、見つからない場合は
+    "Popular_Ninki" を探す。
     """
     people_span = tr.find("span", class_="OddsPeople")
     if people_span is not None:
@@ -222,16 +221,13 @@ def _extract_ninki(tr):
 
     for td in tr.find_all("td"):
         classes = td.get("class") or []
-        if "Popular" not in classes:
-            continue
-        if "Txt_R" in classes or td.find("span", class_="Odds_Ninki") is not None:
-            continue  # オッズ側のtdはスキップ
-        if "Txt_C" not in classes:
+        if "Popular_Ninki" not in classes:
             continue
         text = td.get_text(strip=True)
         m = re.search(r"\d+", text)
         if m:
             return int(m.group())
+
     return None
 
 
@@ -861,6 +857,9 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
       race_id を渡すと対応ページが存在せず「馬番」行が見つからずに
       失敗する。中央競馬かどうかの判定は呼び出し側(app.py)で行い、
       地方競馬の場合はそもそもこの関数を呼ばないようにすること。
+    ※ jiro8は、レースが確定してもすぐには分析データを掲載せず、
+      レース当日に近づいてから掲載することが多い。掲載前にアクセスすると
+      通常のトップページ相当の内容が返り、「馬番」行が見つからず失敗する。
     """
     code = race_id_to_jiro8_code(race_id)
     url = f"{JIRO8_BASE_URL}?code={code}"
@@ -870,7 +869,12 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
     try:
         return _parse_jiro8_speed_index(html)
     except ValueError as e:
-        raise ValueError(f"{e}\nURL: {url}") from e
+        raise ValueError(
+            f"{e}\n"
+            f"URL: {url}\n"
+            "※ jiro8はレース当日に近づくまでデータが掲載されないことが"
+            "多いため、レース直前に改めて実行してみてください。"
+        ) from e
 
 
 def get_multiple_horses(horse_ids: list) -> pd.DataFrame:
