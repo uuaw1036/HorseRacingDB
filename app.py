@@ -36,8 +36,10 @@ DISPLAY_COLUMNS = [
     "馬名",
     "人気",
     "馬場状態",
+    "場",
     "タイム",
     "上がり3F",
+    "通過",
     "馬体重",
     "斤量",
     "着順",
@@ -158,7 +160,12 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
     """出走予定馬同士の対戦成績を表示する(持ちタイム取得時のデータを再利用。追加スクレイピングなし)。"""
     st.subheader("🥊 出走馬同士の対戦成績")
 
-    horse_label_to_id = dict(zip(entries["馬名"], entries["horse_id"]))
+    entries_sorted = entries.sort_values("馬番", na_position="last")
+    labels = [
+        f"{row['馬番']}番 {row['馬名']}" if pd.notna(row["馬番"]) else row["馬名"]
+        for _, row in entries_sorted.iterrows()
+    ]
+    horse_label_to_id = dict(zip(labels, entries_sorted["horse_id"]))
     selected_name = st.selectbox(
         "基準にする馬を選択", list(horse_label_to_id.keys()), key="h2h_horse"
     )
@@ -174,6 +181,7 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     with st.expander("対戦の詳細（レースごとの着順）を見る"):
+        st.caption("タイム差は「本馬のタイム − 相手のタイム」。本馬の方が速い(勝ち)ほどマイナスになります。")
         st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 
@@ -266,33 +274,45 @@ elif races_df is not None:
         if st.session_state.compare_race_id != chosen_race_id:
             st.caption(
                 "※ 現在表示中のデータは以前取得したレースのものです。"
-                "選択中のレースに更新するには「出走馬の持ちタイムを取得」を押してください。"
+                "選択中のレースに更新するには「このレースの出走馬の情報を取得」を押してください。"
             )
 
-        pairs_df = (
-            compare_df[["馬場種別", "距離"]]
-            .dropna()
-            .drop_duplicates()
-            .sort_values(["馬場種別", "距離"])
-        )
-        available_pairs = list(pairs_df.itertuples(index=False, name=None))
+        tab_time, tab_h2h = st.tabs(["🏇 持ちタイム", "🥊 対戦成績"])
 
-        if not available_pairs:
-            st.info("比較できる過去成績が見つかりませんでした。")
-        else:
-            labels = [f"{s}{d}m" for s, d in available_pairs]
-
-            # デフォルトはこのレース自体の馬場種別・距離。データが無ければ先頭を使う。
-            default_index = 0
-            if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
-                default_index = available_pairs.index((race_surface, race_distance))
-
-            choice_label2 = st.selectbox(
-                "表示する距離 (m)", labels, index=default_index, key="dist_choice"
+        with tab_time:
+            pairs_df = (
+                compare_df[["馬場種別", "距離"]]
+                .dropna()
+                .drop_duplicates()
+                .sort_values(["馬場種別", "距離"])
             )
-            surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
+            available_pairs = list(pairs_df.itertuples(index=False, name=None))
 
-            render_result_table(compare_df, entries, distance_choice, surface_choice)
+            if not available_pairs:
+                st.info("比較できる過去成績が見つかりませんでした。")
+            else:
+                labels = [f"{s}{d}m" for s, d in available_pairs]
 
-        st.divider()
-        render_head_to_head(st.session_state.raw_df, entries)
+                # デフォルトはこのレース自体の馬場種別・距離。データが無ければ先頭を使う。
+                default_index = 0
+                if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
+                    default_index = available_pairs.index((race_surface, race_distance))
+
+                choice_label2 = st.selectbox(
+                    "表示する距離 (m)", labels, index=default_index, key="dist_choice"
+                )
+                surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
+
+                render_result_table(compare_df, entries, distance_choice, surface_choice)
+
+            # このレース自体の馬場種別・距離に固定した表を、選択式の表とは
+            # 別にもう一つ、常に表示しておく(上のセレクトボックスで別の
+            # 距離を選んでいても、このレースの条件は常に見えるようにする)。
+            st.markdown("#### 📍 このレースの条件での持ちタイム")
+            if race_surface and race_distance:
+                render_result_table(compare_df, entries, race_distance, race_surface)
+            else:
+                st.info("このレース自体の馬場種別・距離が判別できませんでした。")
+
+        with tab_h2h:
+            render_head_to_head(st.session_state.raw_df, entries)

@@ -128,6 +128,17 @@ def parse_distance_column(value: str):
     return surface, distance
 
 
+def _parse_venue_name(value: str) -> str:
+    """
+    netkeibaの過去成績テーブルの「開催」列は "3阪神6"(3回阪神6日目)の
+    ように、開催回数・競馬場名・日目の数字が結合された文字列になっている。
+    ここから競馬場名の部分だけ("阪神"など)を取り出す。
+    """
+    value = str(value).strip()
+    m = re.search(r"[^\d]+", value)
+    return m.group(0) if m else value
+
+
 def _extract_horse_name_from_title(title_text: str, fallback: str) -> str:
     """
     <title>タグの文字列から馬名だけを取り出す共通処理。
@@ -432,6 +443,10 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
         df["馬場種別"] = parsed.apply(lambda x: x[0])
         df["距離_m"] = parsed.apply(lambda x: x[1])
 
+    # 開催列(例:"3阪神6" = 3回阪神6日目)から競馬場名だけを取り出して「場」列にする
+    if "開催" in df.columns:
+        df["場"] = df["開催"].apply(_parse_venue_name)
+
     df["horse_id"] = horse_id
     df["馬名"] = horse_name
     return df
@@ -467,11 +482,10 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
     if "horse_id" not in out.columns:
         out["horse_id"] = pd.NA
 
-    # 人気・斤量・上がり3F・馬体重・着順はあれば引き継ぐ。無い場合は空欄(NaN)の
-    # 列として追加し、呼び出し側(compare_times.py)が常に同じ列構成を前提に
-    # できるようにする。
-    # ※「脚質」はnetkeibaの過去成績テーブルには含まれていないため取得できない。
-    optional = ["人気", "斤量", "上がり3F", "馬体重", "着順"]
+    # 人気・斤量・上がり3F・馬体重・着順・場・通過はあれば引き継ぐ。無い場合は
+    # 空欄(NaN)の列として追加し、呼び出し側(compare_times.py)が常に同じ
+    # 列構成を前提にできるようにする。
+    optional = ["人気", "斤量", "上がり3F", "馬体重", "着順", "場", "通過"]
     for col in optional:
         if col not in out.columns:
             out[col] = pd.NA

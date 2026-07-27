@@ -61,8 +61,10 @@ DISPLAY_COLUMNS = [
     "馬名",
     "人気",
     "馬場状態",
+    "場",
     "タイム",
     "上がり3F",
+    "通過",
     "馬体重",
     "斤量",
     "着順",
@@ -98,12 +100,14 @@ def compare_by_distance(df: pd.DataFrame, distance: int, surface: str = None) ->
              Noneの場合は距離が一致する全馬場種別を対象にする(通常は
              呼び出し側で芝/ダートを分けて2回呼ぶ想定)。
 
-    戻り値の列は 順位・馬番・馬名・人気・馬場状態・タイム・上がり3F・馬体重・
-    斤量・着順 の順(horse_idは突き合わせ用に残すが表示側で落とす)。
+    戻り値の列は 順位・馬番・馬名・人気・馬場状態・場・タイム・上がり3F・
+    通過・馬体重・斤量・着順 の順(horse_idは突き合わせ用に残すが表示側で落とす)。
     「タイム」列はここでは自己ベスト時点のタイム(表示用文字列)。
     「馬番」「人気」はここでは自己ベストを出したレース時点のものの
     ままなので、現在のレースの値に差し替える場合は呼び出し側(app.py)で
     出馬表データ(horse_id -> 馬番・人気)をマージして上書きすること。
+    「場」「通過」はその自己ベストを記録したレース自体の情報(競馬場名・
+    コーナー通過順)なので差し替えは不要。
     """
     best_df = best_time_per_horse(df)
     subset = best_df[best_df["距離"] == distance].copy()
@@ -149,28 +153,36 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
 
     戻り値: (summary_df, detail_df) のタプル。
       summary_df: 対戦相手ごとの通算成績(○勝●敗△分)。
-      detail_df:  レースごとの対戦詳細(日付・レース名・着順など)。
+      detail_df:  レースごとの対戦詳細(日付・レース名・着順・タイム差など)。
+      「引き分け(△)」は実際に同着だった場合のみで、着順が数値として
+      比較できない対戦(出走取消・除外など)はそもそも集計対象から除外する。
       対戦記録が無い場合はどちらも空のDataFrame。
     """
     empty = pd.DataFrame()
     if raw_df is None or raw_df.empty or "race_id_key" not in raw_df.columns:
         return empty, empty
 
+    target_cols = ["race_id_key", "着順", "日付", "レース名"]
+    if "タイム" in raw_df.columns:
+        target_cols.append("タイム")
     target_races = raw_df.loc[
         (raw_df["horse_id"] == target_horse_id) & raw_df["race_id_key"].notna(),
-        ["race_id_key", "着順", "日付", "レース名"],
-    ].rename(columns={"着順": "本馬着順"})
+        target_cols,
+    ].rename(columns={"着順": "本馬着順", "タイム": "本馬タイム"})
 
     if target_races.empty:
         return empty, empty
 
+    other_cols = ["horse_id", "馬名", "race_id_key", "着順"]
+    if "タイム" in raw_df.columns:
+        other_cols.append("タイム")
     entry_ids = entries["horse_id"].tolist()
     others = raw_df.loc[
         (raw_df["horse_id"] != target_horse_id)
         & raw_df["horse_id"].isin(entry_ids)
         & raw_df["race_id_key"].notna(),
-        ["horse_id", "馬名", "race_id_key", "着順"],
-    ].rename(columns={"着順": "相手着順", "馬名": "対戦相手"})
+        other_cols,
+    ].rename(columns={"着順": "相手着順", "馬名": "対戦相手", "タイム": "相手タイム"})
 
     merged = others.merge(target_races, on="race_id_key", how="inner")
     if merged.empty:
@@ -185,17 +197,33 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     merged["_本馬着順数"] = merged["本馬着順"].apply(_to_num)
     merged["_相手着順数"] = merged["相手着順"].apply(_to_num)
 
+    # 着順が数値として比較できない対戦(出走取消・除外など)は集計対象外にする
+    merged = merged[merged["_本馬着順数"].notna() & merged["_相手着順数"].notna()].copy()
+    if merged.empty:
+        return empty, empty
+
     def _result(row):
         a, b = row["_本馬着順数"], row["_相手着順数"]
-        if a is None or b is None:
-            return "―"
         if a < b:
             return "○"
         if a > b:
             return "●"
-        return "△"
+        return "△"  # 同着のときだけ引き分け
 
     merged["結果"] = merged.apply(_result, axis=1)
+
+    # 相手馬とのタイム差(本馬のタイム - 相手のタイム。本馬の方が速ければマイナス)
+    if "本馬タイム" in merged.columns and "相手タイム" in merged.columns:
+        def _diff(row):
+            try:
+                d = parse_time(row["本馬タイム"]) - parse_time(row["相手タイム"])
+            except (ValueError, TypeError):
+                return None
+            return f"{d:+.1f}"
+
+        merged["タイム差(本馬-相手)"] = merged.apply(_diff, axis=1)
+    else:
+        merged["タイム差(本馬-相手)"] = None
 
     summary_df = (
         merged.groupby("対戦相手")["結果"]
@@ -205,7 +233,7 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     )
 
     detail_df = merged[
-        ["対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果"]
+        ["対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果", "タイム差(本馬-相手)"]
     ].sort_values(["対戦相手", "日付"]).reset_index(drop=True)
 
     return summary_df, detail_df
