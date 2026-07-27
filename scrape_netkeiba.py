@@ -924,14 +924,30 @@ def race_id_to_jiro8_code(race_id: str) -> str:
     return race_id
 
 
+JIRO8_BLOCK_LABEL_TO_COLUMN = {
+    "前走の成績": "前走",
+    "２走前の成績": "2走前",
+    "３走前の成績": "3走前",
+    "４走前の成績": "4走前",
+    "５走前の成績": "5走前",
+}
+JIRO8_RACE_COLUMNS = ["前走", "2走前", "3走前", "4走前", "5走前"]
+
+
 def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
     """
     jiro8のレースページHTMLから、馬番ごとの過去5走分の「スピード指数」を
-    抽出し、平均指数・最高指数を計算して返す(列: 馬番, 平均指数, 最高指数)。
+    抽出し、平均指数・最高指数に加えて前走〜5走前それぞれの指数を返す
+    (列: 馬番, 平均指数, 最高指数, 前走, 2走前, 3走前, 4走前, 5走前)。
 
     ページ構造がHTML/コード解析目的で組まれておらず(pandas.read_html等では
     崩れやすい)、かつ「スピード指数」のラベルは１走前のブロックにしか
     付いていないため、行位置(オフセット)で判定する専用ロジックにしている。
+
+    各馬の「前走」「2走前」...「5走前」は、ブロックのラベル行(例:
+    "２走前の成績")を基準に列を決めるため、途中の走(例: 3走前)だけ
+    指数が空欄(出走取消・除外など)だった場合でも、後続の走(4走前・
+    5走前)の値が繰り上がってズレることはない。
     """
     soup = BeautifulSoup(html, "lxml")
 
@@ -976,20 +992,20 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
 
     rows = data_tbody.find_all("tr", recursive=False)
 
-    speed_rows = []
+    # 馬番 -> {"前走": 値, "2走前": 値, ...} の対応を、ブロックラベル基準で作る
+    per_horse_race_values = {umaban: {} for umaban in umaban_list if umaban is not None}
     for i, tr in enumerate(rows):
         tds = tr.find_all("td")
         if not tds:
             continue
         label = tds[-1].get_text(strip=True)
-        if label in JIRO8_BLOCK_START_LABELS and i + JIRO8_SPEED_INDEX_OFFSET < len(rows):
-            speed_tds = rows[i + JIRO8_SPEED_INDEX_OFFSET].find_all("td")
-            if len(speed_tds) - 1 == n_cols:  # 末尾はラベルセルなので-1
-                speed_rows.append(speed_tds[:-1])
-
-    per_horse = {umaban: [] for umaban in umaban_list if umaban is not None}
-    for row in speed_rows:
-        for umaban, td in zip(umaban_list, row):
+        column_name = JIRO8_BLOCK_LABEL_TO_COLUMN.get(label)
+        if column_name is None or i + JIRO8_SPEED_INDEX_OFFSET >= len(rows):
+            continue
+        speed_tds = rows[i + JIRO8_SPEED_INDEX_OFFSET].find_all("td")
+        if len(speed_tds) - 1 != n_cols:  # 末尾はラベルセルなので-1
+            continue
+        for umaban, td in zip(umaban_list, speed_tds[:-1]):
             if umaban is None:
                 continue
             text = td.get_text(strip=True)
@@ -997,19 +1013,21 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
                 value = float(text)
             except ValueError:
                 continue  # 出走取消・除外などで指数が空欄の場合はスキップ
-            per_horse[umaban].append(value)
+            per_horse_race_values[umaban][column_name] = value
 
     records = []
-    for umaban, values in per_horse.items():
-        if not values:
+    for umaban, race_values in per_horse_race_values.items():
+        if not race_values:
             continue
-        records.append(
-            {
-                "馬番": umaban,
-                "平均指数": round(sum(values) / len(values), 1),
-                "最高指数": max(values),
-            }
-        )
+        values = list(race_values.values())
+        record = {
+            "馬番": umaban,
+            "平均指数": round(sum(values) / len(values), 1),
+            "最高指数": max(values),
+        }
+        for col in JIRO8_RACE_COLUMNS:
+            record[col] = race_values.get(col, pd.NA)
+        records.append(record)
     return pd.DataFrame(records)
 
 
@@ -1045,7 +1063,8 @@ def _decode_jiro8_response(response) -> str:
 def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
     """
     jiro8サイトから対象レースの各馬(馬番)の過去5走分の「スピード指数」を
-    取得し、馬番ごとの平均指数・最高指数を返す(列: 馬番, 平均指数, 最高指数)。
+    取得し、馬番ごとの平均指数・最高指数・前走〜5走前それぞれの指数を返す
+    (列: 馬番, 平均指数, 最高指数, 前走, 2走前, 3走前, 4走前, 5走前)。
 
     race_id: netkeibaのレースID(例: "202609030611")。先頭の"20"を除いた
              ものがjiro8のURLパラメータ code になる。

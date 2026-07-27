@@ -46,7 +46,16 @@ DISPLAY_COLUMNS = [
     "着順",
     "平均指数",
     "最高指数",
+    "前走",
+    "2走前",
+    "3走前",
+    "4走前",
+    "5走前",
 ]
+
+# jiro8スピード指数のうち「馬番」以外の列(app.py内でのデフォルト値作成・
+# マージ・書式設定を1箇所にまとめて管理するため定数化)
+SPEED_INDEX_VALUE_COLUMNS = ["平均指数", "最高指数", "前走", "2走前", "3走前", "4走前", "5走前"]
 
 # --- セッション状態の初期化 -------------------------------------------
 for key in [
@@ -101,10 +110,10 @@ def fetch_compare_data(race_id: str, central: bool = True):
                 speed_index_df = get_speed_index_by_umaban(race_id)
             except Exception as e:
                 st.warning(f"⚠️ スピード指数の取得に失敗しました: {e}")
-                speed_index_df = pd.DataFrame(columns=["馬番", "平均指数", "最高指数"])
+                speed_index_df = pd.DataFrame(columns=["馬番"] + SPEED_INDEX_VALUE_COLUMNS)
     else:
         st.caption("※ スピード指数(jiro8)は中央競馬のみ対応のため、地方競馬では取得しません。")
-        speed_index_df = pd.DataFrame(columns=["馬番", "平均指数", "最高指数"])
+        speed_index_df = pd.DataFrame(columns=["馬番"] + SPEED_INDEX_VALUE_COLUMNS)
 
     st.session_state.compare_df = compare_df
     st.session_state.compare_entries = entries
@@ -220,7 +229,10 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
         lambda col: _apply_speed_colors(col, speed_max_colors), subset=["最高指数"]
     )
 
-    styler = styler.format({"平均指数": "{:.2f}", "最高指数": "{:.2f}"}, na_rep="")
+    race_col_format = {col: "{:.1f}" for col in ["前走", "2走前", "3走前", "4走前", "5走前"]}
+    styler = styler.format(
+        {"平均指数": "{:.2f}", "最高指数": "{:.2f}", **race_col_format}, na_rep=""
+    )
 
     return styler
 
@@ -265,10 +277,14 @@ def build_table(
         speed_df["馬番"] = pd.array(
             pd.to_numeric(speed_df["馬番"], errors="coerce"), dtype="Int64"
         )
-        result = result.merge(speed_df[["馬番", "平均指数", "最高指数"]], on="馬番", how="left")
+        available_cols = ["馬番"] + [c for c in SPEED_INDEX_VALUE_COLUMNS if c in speed_df.columns]
+        result = result.merge(speed_df[available_cols], on="馬番", how="left")
+        for col in SPEED_INDEX_VALUE_COLUMNS:
+            if col not in result.columns:
+                result[col] = pd.NA
     else:
-        result["平均指数"] = pd.NA
-        result["最高指数"] = pd.NA
+        for col in SPEED_INDEX_VALUE_COLUMNS:
+            result[col] = pd.NA
 
     return result[DISPLAY_COLUMNS]
 
