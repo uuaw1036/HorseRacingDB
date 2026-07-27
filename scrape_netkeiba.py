@@ -710,7 +710,7 @@ JIRO8_BASE_URL = "https://jiro8.sakura.ne.jp/index.php"
 # 4行が各ブロックの末尾に固定順で並ぶため)。２走前以降のブロックではラベル
 # テキストが省略される(先頭の「前走の成績」ブロックにしか付かない)ため、
 # ラベル文字列ではなく行位置(オフセット)で判定する。
-JIRO8_SPEED_INDEX_OFFSET = 13
+JIRO8__INDEX_OFFSET = 13
 JIRO8_BLOCK_START_LABELS = {
     "前走の成績",
     "２走前の成績",
@@ -732,7 +732,7 @@ def race_id_to_jiro8_code(race_id: str) -> str:
     return race_id
 
 
-def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
+def _parse_jiro8__index(html: str) -> pd.DataFrame:
     """
     jiro8のレースページHTMLから、馬番ごとの過去5走分の「スピード指数」を
     抽出し、平均指数・最高指数を計算して返す(列: 馬番, 平均指数, 最高指数)。
@@ -779,19 +779,19 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
 
     rows = data_tbody.find_all("tr", recursive=False)
 
-    speed_rows = []
+    _rows = []
     for i, tr in enumerate(rows):
         tds = tr.find_all("td")
         if not tds:
             continue
         label = tds[-1].get_text(strip=True)
-        if label in JIRO8_BLOCK_START_LABELS and i + JIRO8_SPEED_INDEX_OFFSET < len(rows):
-            speed_tds = rows[i + JIRO8_SPEED_INDEX_OFFSET].find_all("td")
-            if len(speed_tds) - 1 == n_cols:  # 末尾はラベルセルなので-1
-                speed_rows.append(speed_tds[:-1])
+        if label in JIRO8_BLOCK_START_LABELS and i + JIRO8__INDEX_OFFSET < len(rows):
+            _tds = rows[i + JIRO8__INDEX_OFFSET].find_all("td")
+            if len(_tds) - 1 == n_cols:  # 末尾はラベルセルなので-1
+                _rows.append(_tds[:-1])
 
     per_horse = {umaban: [] for umaban in umaban_list if umaban is not None}
-    for row in speed_rows:
+    for row in _rows:
         for umaban, td in zip(umaban_list, row):
             if umaban is None:
                 continue
@@ -857,23 +857,39 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
       race_id を渡すと対応ページが存在せず「馬番」行が見つからずに
       失敗する。中央競馬かどうかの判定は呼び出し側(app.py)で行い、
       地方競馬の場合はそもそもこの関数を呼ばないようにすること。
-    ※ jiro8は、レースが確定してもすぐには分析データを掲載せず、
-      レース当日に近づいてから掲載することが多い。掲載前にアクセスすると
-      通常のトップページ相当の内容が返り、「馬番」行が見つからず失敗する。
+    ※ jiro8はRefererやセッション(Cookie)の有無を見ているらしく、
+      トップページを経由せずに index.php?code=... へ直接アクセスすると、
+      本来のレースページではなく汎用ページ(トップページ相当)が返って
+      くることがある。そのため、まずトップページに一度アクセスして
+      Cookieを取得し、Refererを付けたうえで本来のページを取得する。
     """
     code = race_id_to_jiro8_code(race_id)
     url = f"{JIRO8_BASE_URL}?code={code}"
-    response = requests.get(url, headers=HEADERS)
+
+    session = requests.Session()
+    # まずトップページにアクセスしてセッションCookieを確立する
+    # (ここが失敗しても、本アクセス自体はダメ元で試みる)
+    try:
+        session.get(JIRO8_BASE_URL, headers=HEADERS, timeout=10)
+        time.sleep(0.5)
+    except requests.RequestException:
+        pass
+
+    sub_headers = dict(HEADERS)
+    sub_headers["Referer"] = JIRO8_BASE_URL
+    response = session.get(url, headers=sub_headers)
     response.raise_for_status()
     html = _decode_jiro8_response(response)
+
     try:
         return _parse_jiro8_speed_index(html)
     except ValueError as e:
         raise ValueError(
             f"{e}\n"
             f"URL: {url}\n"
-            "※ jiro8はレース当日に近づくまでデータが掲載されないことが"
-            "多いため、レース直前に改めて実行してみてください。"
+            "※ トップページ経由(Referer・Cookieあり)でアクセスしても改善"
+            "しない場合、jiro8側にまだこのレースのデータが掲載されていない"
+            "可能性があります。レース直前に改めて実行してみてください。"
         ) from e
 
 
