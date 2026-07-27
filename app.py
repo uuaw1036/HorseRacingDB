@@ -16,7 +16,7 @@ from compare_times import best_time_per_horse, compare_by_distance, head_to_head
 
 st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
 
-st.title("🏇 持ちタイム比較&対戦成績ダッシュボード")
+st.markdown("## 🏇 持ちタイム比較ダッシュボード")
 st.write(
     "※30分間に5回以上の取得をする際はIPアドレスの変更を推奨します"
     "（Wi-Fiを変更・切断、VPN接続等）"
