@@ -194,7 +194,7 @@ def _extract_ninki(tr):
     """
     <tr>から「人気」の値を取得する。
 
-    netkeibaのページには、人気の持たせ方が少なくとも2パターンある。
+    netkeibaのページには、人気の持たせ方が少なくとも3パターンある。
 
     1. 中央競馬の出馬表(shutuba.html)のパターン:
        人気のセルには "Popular_Ninki" という専用クラスが付いており、
@@ -210,9 +210,18 @@ def _extract_ninki(tr):
          - 人気:  <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
          - オッズ: <td class="Odds Txt_R"><span class="Odds_Ninki">4.8</span></td>
 
+    3. 地方競馬の出馬表(nar.netkeiba.com/race/shutuba.html)のパターン:
+       中央競馬と違い "Popular_Ninki" のような専用クラスは付かず、
+       "Popular" クラスだけがオッズ・人気の両方のセルに共通して付く。
+       ただし、揃え方(Txt_R/Txt_C)で区別できる。
+         - オッズ: <td class="Popular Txt_R">110.2</td>
+         - 人気:   <td class="Popular Txt_C">7</td>
+       ("Popular" と "Txt_C" を両方持つセル)
+       中身は<span>で包まれておらず、tdのテキストにそのまま数字が入っている。
+
     "OddsPeople" と "Popular_Ninki" はどちらも人気専用の目印で他の値と
-    紛れないため、まず "OddsPeople" を最優先で探し、見つからない場合は
-    "Popular_Ninki" を探す。
+    紛れないため、まず "OddsPeople" を最優先で探し、次に "Popular_Ninki"、
+    最後に地方競馬パターン("Popular"+"Txt_C")を探す。
     """
     people_span = tr.find("span", class_="OddsPeople")
     if people_span is not None:
@@ -229,6 +238,16 @@ def _extract_ninki(tr):
         m = re.search(r"\d+", text)
         if m:
             return int(m.group())
+
+    # パターン3: 地方競馬(NAR)。"Popular"かつ"Txt_C"のtdが人気、
+    # "Popular"かつ"Txt_R"のtdがオッズなので、Txt_Cの方だけを拾う。
+    for td in tr.find_all("td"):
+        classes = td.get("class") or []
+        if "Popular" in classes and "Txt_C" in classes:
+            text = td.get_text(strip=True)
+            m = re.fullmatch(r"\d+", text)
+            if m:
+                return int(m.group())
 
     return None
 
@@ -291,8 +310,10 @@ def get_win_odds_ninki(race_id: str, central: bool = True) -> pd.DataFrame:
       外側の"1"は券種(1=単勝)固定。内側のキーが馬番(文字列)、値が
       [オッズ, (未使用/複勝オッズ枠?), 人気] の3要素配列になっている。
 
-    central: True なら中央競馬(race.netkeiba.com)。地方競馬(nar)側の
-             同等APIは未検証のため、Falseの場合は呼び出さず空のDataFrameを返す。
+    central: True なら中央競馬(race.netkeiba.com)。この関数は中央競馬専用で、
+             地方競馬(nar.netkeiba.com)はURL・レスポンス形式が異なるため
+             get_win_odds_ninki_nar() を使うこと。Falseの場合は呼び出さず
+             空のDataFrameを返す。
     ※ オッズ発表前・レース確定後などでデータが無い場合は
       status が "NG" になるので、その場合も空のDataFrameを返す
       (エラーにはしない。呼び出し側は静的HTML側の値をそのまま使えばよい)。
@@ -335,6 +356,76 @@ def get_win_odds_ninki(race_id: str, central: bool = True) -> pd.DataFrame:
             ninki = int(ninki_str) if ninki_str else None
         except ValueError:
             ninki = None
+        records.append({"馬番": int(umaban_str), "単勝オッズ": odds, "人気": ninki})
+
+    if not records:
+        return empty
+    return pd.DataFrame(records).sort_values("馬番").reset_index(drop=True)
+
+
+def get_win_odds_ninki_nar(race_id: str) -> pd.DataFrame:
+    """
+    地方競馬(NAR)の単勝オッズ・人気を専用APIから取得する(馬番, 単勝オッズ, 人気)。
+
+    中央競馬(get_win_odds_ninki)とはURL・レスポンス形式が異なるため
+    専用の関数にしている。地方競馬の出馬表は静的HTMLの時点で既に
+    人気(td class="Popular Txt_C")が入っていることが多く、このAPIは
+    その値がまだ入っていない場合(レース直前でオッズが未確定など)の
+    フォールバックとして使う。
+
+    URL: https://nar.netkeiba.com/api/api_get_nar_odds.html
+         ?race_id={race_id}&type=1&action=init
+      (type=1 が単勝オッズ。動作確認済み。)
+
+    レスポンス例:
+      {"status":"OK","odds_status":"real",
+       "ary_odds":{"01":{"Odds":"110.2","Ninki":7}, "02":{"Odds":"7.8","Ninki":4}, ...}}
+      "ary_odds"のキーが馬番(2桁ゼロ埋め文字列)、値が
+      {"Odds": オッズ文字列, "Ninki": 人気(int)} の辞書になっている。
+
+    ※ オッズ発表前・レース確定後などでデータが無い場合はstatusが
+      "NG"になる(中央競馬側と同様)。その場合も空のDataFrameを返す。
+    """
+    empty = pd.DataFrame(columns=["馬番", "単勝オッズ", "人気"])
+
+    url = (
+        "https://nar.netkeiba.com/api/api_get_nar_odds.html"
+        f"?race_id={race_id}&type=1&action=init"
+    )
+    headers = dict(HEADERS)
+    headers["Referer"] = f"https://nar.netkeiba.com/race/shutuba.html?race_id={race_id}"
+    headers["X-Requested-With"] = "XMLHttpRequest"
+
+    response = requests.get(url, headers=headers, timeout=10)
+    response.raise_for_status()
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return empty
+
+    if payload.get("status") != "OK":
+        return empty
+
+    ary_odds = payload.get("ary_odds", {})
+    if not ary_odds:
+        return empty
+
+    records = []
+    for umaban_str, values in ary_odds.items():
+        if not str(umaban_str).isdigit():
+            continue
+        odds_str = values.get("Odds", "") if isinstance(values, dict) else ""
+        ninki_val = values.get("Ninki") if isinstance(values, dict) else None
+        try:
+            odds = float(odds_str) if odds_str else None
+        except ValueError:
+            odds = None
+        try:
+            ninki = int(ninki_val) if ninki_val is not None else None
+        except (ValueError, TypeError):
+            ninki = None
+        # "01"のようなゼロ埋め文字列でもintに変換すれば正しい馬番になる
         records.append({"馬番": int(umaban_str), "単勝オッズ": odds, "人気": ninki})
 
     if not records:
@@ -489,12 +580,18 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
         ]
     )
 
-    # 静的HTMLには人気がJSで後から埋め込まれる場合があり(この場合は
-    # 全行が空欄になる)、そのときは専用オッズAPIから取り直して埋める。
+    # 静的HTMLには人気が入っていない場合(中央競馬はJSで後から埋め込む
+    # ため全行が空欄になりやすい。地方競馬は静的HTMLに人気があることが
+    # 多いが、レース直前などでまだ確定していないと同様に空欄になりうる)、
+    # そのときは専用オッズAPIから取り直して埋める。
     # 馬番は静的HTML側で取得できている前提(馬番自体はJS埋め込みではない)。
-    if central and df["人気"].isna().all():
+    if df["人気"].isna().all():
         try:
-            odds_df = get_win_odds_ninki(race_id, central=central)
+            odds_df = (
+                get_win_odds_ninki(race_id, central=True)
+                if central
+                else get_win_odds_ninki_nar(race_id)
+            )
         except requests.RequestException:
             odds_df = pd.DataFrame(columns=["馬番", "単勝オッズ", "人気"])
 
