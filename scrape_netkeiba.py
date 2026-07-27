@@ -205,8 +205,10 @@ def _extract_ninki(tr):
        "Popular_Ninki" の有無で確実に区別できる。
 
     2. 中央競馬の結果ページ(race.netkeiba.com、レース確定後)のパターン:
-       人気の値は専用の <span class="OddsPeople">1</span> に入っている。
-         <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
+       クラス名が "Popular" ではなく "Odds" になっており、人気の値は
+       専用の <span class="OddsPeople">1</span> に入っている。
+         - 人気:  <td class="Odds BgYellow Txt_C"><span class="OddsPeople">1</span></td>
+         - オッズ: <td class="Odds Txt_R"><span class="Odds_Ninki">4.8</span></td>
 
     "OddsPeople" と "Popular_Ninki" はどちらも人気専用の目印で他の値と
     紛れないため、まず "OddsPeople" を最優先で探し、見つからない場合は
@@ -229,7 +231,6 @@ def _extract_ninki(tr):
             return int(m.group())
 
     return None
-
 
 
 def _extract_umaban(tr):
@@ -710,7 +711,7 @@ JIRO8_BASE_URL = "https://jiro8.sakura.ne.jp/index.php"
 # 4行が各ブロックの末尾に固定順で並ぶため)。２走前以降のブロックではラベル
 # テキストが省略される(先頭の「前走の成績」ブロックにしか付かない)ため、
 # ラベル文字列ではなく行位置(オフセット)で判定する。
-JIRO8__INDEX_OFFSET = 13
+JIRO8_SPEED_INDEX_OFFSET = 13
 JIRO8_BLOCK_START_LABELS = {
     "前走の成績",
     "２走前の成績",
@@ -732,7 +733,7 @@ def race_id_to_jiro8_code(race_id: str) -> str:
     return race_id
 
 
-def _parse_jiro8__index(html: str) -> pd.DataFrame:
+def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
     """
     jiro8のレースページHTMLから、馬番ごとの過去5走分の「スピード指数」を
     抽出し、平均指数・最高指数を計算して返す(列: 馬番, 平均指数, 最高指数)。
@@ -765,8 +766,8 @@ def _parse_jiro8__index(html: str) -> pd.DataFrame:
             f"ページタイトル: {title_text!r} / "
             f"ページ内のどこかに「馬番」という文字列があるか: {umaban_anywhere}\n"
             "「馬番」がどこにも無い場合は、そのcode(race_id)のレースが"
-            "jiro8に登録されていない(まだレース当日ではない/対象外のレース)か、"
-            "サイト側でエラーページが返っている可能性が高いです。"
+            "jiro8にまだ掲載されていない(レース直前まで掲載されないことが多い)か、"
+            "サイト側でエラーページ・アクセス制限ページが返っている可能性が高いです。"
             "ある場合はテーブルの行構成自体が変わった可能性があります。"
             f"\n取得できた内容の先頭: {snippet!r}"
         )
@@ -779,19 +780,19 @@ def _parse_jiro8__index(html: str) -> pd.DataFrame:
 
     rows = data_tbody.find_all("tr", recursive=False)
 
-    _rows = []
+    speed_rows = []
     for i, tr in enumerate(rows):
         tds = tr.find_all("td")
         if not tds:
             continue
         label = tds[-1].get_text(strip=True)
-        if label in JIRO8_BLOCK_START_LABELS and i + JIRO8__INDEX_OFFSET < len(rows):
-            _tds = rows[i + JIRO8__INDEX_OFFSET].find_all("td")
-            if len(_tds) - 1 == n_cols:  # 末尾はラベルセルなので-1
-                _rows.append(_tds[:-1])
+        if label in JIRO8_BLOCK_START_LABELS and i + JIRO8_SPEED_INDEX_OFFSET < len(rows):
+            speed_tds = rows[i + JIRO8_SPEED_INDEX_OFFSET].find_all("td")
+            if len(speed_tds) - 1 == n_cols:  # 末尾はラベルセルなので-1
+                speed_rows.append(speed_tds[:-1])
 
     per_horse = {umaban: [] for umaban in umaban_list if umaban is not None}
-    for row in _rows:
+    for row in speed_rows:
         for umaban, td in zip(umaban_list, row):
             if umaban is None:
                 continue
@@ -862,6 +863,8 @@ def get_speed_index_by_umaban(race_id: str) -> pd.DataFrame:
       本来のレースページではなく汎用ページ(トップページ相当)が返って
       くることがある。そのため、まずトップページに一度アクセスして
       Cookieを取得し、Refererを付けたうえで本来のページを取得する。
+    ※ それでも失敗する場合は、jiro8側にまだそのレースのデータが
+      掲載されていない(レース直前まで掲載されないことが多い)可能性が高い。
     """
     code = race_id_to_jiro8_code(race_id)
     url = f"{JIRO8_BASE_URL}?code={code}"
