@@ -752,7 +752,12 @@ def _parse_jiro8_speed_index(html: str) -> pd.DataFrame:
         tds = tr.find_all("td")
         if tds and tds[-1].get_text(strip=True) == "馬番":
             umaban_row = tds[:-1]
-            data_tbody = tr.find_parent("tbody")
+            # jiro8が返す生HTMLには <tbody> タグが無いことがある
+            # (ブラウザ側でDOM表示する際に自動補完されるだけで、
+            # requestsで取得した生のレスポンスには含まれない場合がある)。
+            # find_parent("tbody") だとその場合に None になってしまうため、
+            # tbodyの有無に関わらず直接の親要素を使う。
+            data_tbody = tr.parent
             break
 
     if umaban_row is None or data_tbody is None:
