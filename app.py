@@ -14,7 +14,7 @@ from scrape_netkeiba import (
     parse_venue_name,
     prepare_for_compare,
 )
-from compare_times import best_time_per_horse, compare_by_distance, head_to_head_records
+from compare_times import best_time_per_horse, compare_by_distance, head_to_head_records, parse_time
 
 st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
 
@@ -160,6 +160,59 @@ def style_by_ninki(df: pd.DataFrame):
     return styler.applymap(_color, subset=["人気"])
 
 
+def _rank_top3_colors(values: pd.Series, ascending: bool) -> pd.Series:
+    """
+    values を順位付けし、1〜3位に対応する背景色(人気と同じ配色)を、
+    元の行位置(index)を保ったままSeriesとして返す(4位以下・NaNは空文字)。
+
+    ascending=True: 値が小さいほど上位(タイム・上がり3Fなど)
+    ascending=False: 値が大きいほど上位(スピード指数など)
+    """
+    numeric = pd.to_numeric(values, errors="coerce")
+    ranks = numeric.rank(method="min", ascending=ascending)
+
+    def _color(rank):
+        if pd.isna(rank) or int(rank) not in NINKI_COLORS:
+            return ""
+        return f"background-color: {NINKI_COLORS[int(rank)]}"
+
+    return ranks.apply(_color)
+
+
+def style_result_table(df: pd.DataFrame):
+    """
+    持ちタイム比較表に色付けを行うStyler。
+    - 人気: 1〜3位のセルに色付け(値そのものが順位)
+    - タイム・上がり3F: 列内で速い順に1〜3位のセルに色付け
+      (タイムは表示用の文字列"1:33.4"のため、順位判定だけ秒数に変換する)
+    - 平均指数・最高指数: 列内で高い順に1〜3位のセルに色付け
+      (あわせて小数第2位までの表示に揃える)
+    """
+    styler = style_by_ninki(df)
+
+    time_seconds = df["タイム"].apply(
+        lambda t: parse_time(t) if pd.notna(t) and str(t).strip() else pd.NA
+    )
+    rank_targets = [
+        ("タイム", time_seconds, True),
+        ("上がり3F", df["上がり3F"], True),
+        ("平均指数", df["平均指数"], False),
+        ("最高指数", df["最高指数"], False),
+    ]
+
+    for column, values, ascending in rank_targets:
+        colors = _rank_top3_colors(values, ascending=ascending)
+
+        def _apply(col: pd.Series, colors=colors):
+            return [colors.get(idx, "") for idx in col.index]
+
+        styler = styler.apply(_apply, subset=[column])
+
+    styler = styler.format({"平均指数": "{:.2f}", "最高指数": "{:.2f}"}, na_rep="")
+
+    return styler
+
+
 def style_by_yuretsu(df: pd.DataFrame):
     """優劣列だけをセル単位で色分けするStyler。
 
@@ -245,7 +298,7 @@ def render_result_table(
 
     label = f"{venue}・{surface}{distance}m" if venue else f"{surface}{distance}m"
     st.success(f"分析完了（{label} 持ちタイムランキング）")
-    st.dataframe(style_by_ninki(result), use_container_width=True, hide_index=True)
+    st.dataframe(style_result_table(result), use_container_width=True, hide_index=True)
 
 
 def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
