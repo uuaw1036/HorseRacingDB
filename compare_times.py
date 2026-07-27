@@ -226,9 +226,9 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
                 return None
             return f"{d:+.1f}"
 
-        merged["タイム差(本馬-相手)"] = merged.apply(_diff, axis=1)
+        merged["タイム差"] = merged.apply(_diff, axis=1)
     else:
-        merged["タイム差(本馬-相手)"] = None
+        merged["タイム差"] = None
 
     def _summarize(s: pd.Series) -> tuple:
         wins = int((s == "○").sum())
@@ -263,7 +263,7 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     )
 
     detail_df = merged[
-        ["馬番", "対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果", "タイム差(本馬-相手)"]
+        ["馬番", "対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果", "タイム差"]
     ].sort_values(["馬番", "日付"]).reset_index(drop=True)
 
     return summary_df, detail_df
