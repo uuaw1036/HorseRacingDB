@@ -379,8 +379,12 @@ def build_table(
     # "{:.1f}"等の数値フォーマット(na_rep="")を適用するため、
     # ここで空文字に変換すると "{:.1f}".format("") がエラーになる。
     # そのためこれらの列はNaNのまま残し、それ以外の列だけ空欄化する。
+    # 「人気」はInt64(null許容整数)型のため、そのままfillna("")すると
+    # 環境によってはエラーになったり空欄化されずNoneのような表示が
+    # 残ったりする。object型に変換してから空文字で埋めることで確実に
+    # 空欄にする。
     fillna_cols = [c for c in result.columns if c not in SPEED_INDEX_VALUE_COLUMNS]
-    result[fillna_cols] = result[fillna_cols].fillna("")
+    result[fillna_cols] = result[fillna_cols].astype(object).fillna("")
 
     valid_cols = [c for c in display_cols if c in result.columns]
     return result[valid_cols]
