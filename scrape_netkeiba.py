@@ -728,7 +728,6 @@ def get_race_list(date: str, central: bool = True) -> pd.DataFrame:
         raise ValueError(
             f"{date} のレースが見つかりませんでした。開催が無い日か、"
             "サイトのHTML構造が変わっている可能性があります。"
-            "その場合はレースIDを直接入力する方法をお試しください。"
         )
 
     df = pd.DataFrame(list(races.values()))
