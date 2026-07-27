@@ -20,7 +20,7 @@ st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout=
 
 st.markdown("## 🏇 持ちタイム比較&対戦成績ダッシュボード")
 st.write(
-    "※30分間に5回以上の取得をする際はIPアドレスの変更を推奨します"
+    "※30分間に5回以上の取得をする際はIPアドレスの変更を推奨"
     "（Wi-Fiを変更・切断、VPN接続等）"
 )
 
