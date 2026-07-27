@@ -56,7 +56,6 @@ def load_data(csv_path: str) -> pd.DataFrame:
 
 DISPLAY_COLUMNS = [
     "horse_id",  # 表示はしないが、現在のレースの馬番・人気を突き合わせるために残す
-    "順位",
     "馬番",
     "馬名",
     "人気",
@@ -100,8 +99,9 @@ def compare_by_distance(df: pd.DataFrame, distance: int, surface: str = None) ->
              Noneの場合は距離が一致する全馬場種別を対象にする(通常は
              呼び出し側で芝/ダートを分けて2回呼ぶ想定)。
 
-    戻り値の列は 順位・馬番・馬名・人気・馬場状態・場・タイム・上がり3F・
+    戻り値の列は 馬番・馬名・人気・馬場状態・場・タイム・上がり3F・
     通過・馬体重・斤量・着順 の順(horse_idは突き合わせ用に残すが表示側で落とす)。
+    行の並び順はタイムが速い順(ランキング)のまま。
     「タイム」列はここでは自己ベスト時点のタイム(表示用文字列)。
     「馬番」「人気」はここでは自己ベストを出したレース時点のものの
     ままなので、現在のレースの値に差し替える場合は呼び出し側(app.py)で
@@ -114,7 +114,6 @@ def compare_by_distance(df: pd.DataFrame, distance: int, surface: str = None) ->
     if surface is not None:
         subset = subset[subset["馬場種別"] == surface]
     subset = subset.sort_values("タイム_秒").reset_index(drop=True)
-    subset.insert(0, "順位", subset.index + 1)
 
     subset = subset.drop(columns=["タイム"], errors="ignore").rename(
         columns={"表示タイム": "タイム"}
@@ -152,7 +151,9 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     target_horse_id: 基準にする馬の horse_id。
 
     戻り値: (summary_df, detail_df) のタプル。
-      summary_df: 対戦相手ごとの通算成績(馬番・対戦相手・○勝●敗△分)。
+      summary_df: 対戦相手ごとの通算成績(馬番・対戦相手・○勝●敗△分・優劣)。
+                  優劣は本馬から見て勝ち越しなら「優」、負け越しなら「劣」、
+                  五分(勝ち数=負け数)なら「－」。
       detail_df:  レースごとの対戦詳細(馬番・日付・レース名・着順・タイム差など)。
       「引き分け(△)」は実際に同着だった場合のみで、着順が数値として
       比較できない対戦(出走取消・除外など)はそもそも集計対象から除外する。
@@ -229,7 +230,7 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     else:
         merged["タイム差(本馬-相手)"] = None
 
-    def _summarize(s: pd.Series) -> str:
+    def _summarize(s: pd.Series) -> tuple:
         wins = int((s == "○").sum())
         losses = int((s == "●").sum())
         draws = int((s == "△").sum())
@@ -237,13 +238,26 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
         if draws > 0:
             # 引き分け(同着)が実際にある場合のみ表示する
             text += f"{draws}分"
-        return text
+        # 勝ち越し=優、負け越し=劣、五分=－(本馬から見て)
+        if wins > losses:
+            yuretsu = "優"
+        elif wins < losses:
+            yuretsu = "劣"
+        else:
+            yuretsu = "－"
+        return text, yuretsu
 
+    # groupby().apply()でSeriesを返すと、pandasのバージョンによって
+    # 複数列に展開されず縦持ち(level_2列付き)になってしまうことがあるため、
+    # 明示的にループしてDataFrameを組み立てる。
+    summary_rows = []
+    for (umaban, aite), group in merged.groupby(["馬番", "対戦相手"])["結果"]:
+        text, yuretsu = _summarize(group)
+        summary_rows.append(
+            {"馬番": umaban, "対戦相手": aite, "対戦成績(本馬から見て)": text, "優劣": yuretsu}
+        )
     summary_df = (
-        merged.groupby(["馬番", "対戦相手"])["結果"]
-        .apply(_summarize)
-        .reset_index()
-        .rename(columns={"結果": "対戦成績(本馬から見て)"})
+        pd.DataFrame(summary_rows, columns=["馬番", "対戦相手", "対戦成績(本馬から見て)", "優劣"])
         .sort_values("馬番")
         .reset_index(drop=True)
     )

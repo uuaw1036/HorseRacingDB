@@ -30,9 +30,8 @@ NINKI_COLORS = {
     3: "#FFCDD2",  # 薄い赤
 }
 
-# 最終的な表示列(順位〜着順)。horse_idは表示直前に落とす。
+# 最終的な表示列(馬番〜着順、タイムが速い順に並ぶ)。horse_idは表示直前に落とす。
 DISPLAY_COLUMNS = [
-    "順位",
     "馬番",
     "馬名",
     "人気",
@@ -145,9 +144,10 @@ def build_table(
         result = result[result["場"] == venue]
         if result.empty:
             return result
-        # 絞り込みで順位に欠番ができるため、振り直す
-        result = result.sort_values("順位").reset_index(drop=True)
-        result["順位"] = result.index + 1
+        # compare_by_distance()の時点でタイム昇順に並んでおり、
+        # boolean条件での絞り込みでもその順序は保たれるため、
+        # インデックスを振り直すだけでよい。
+        result = result.reset_index(drop=True)
 
     # 過去成績時点の馬番・人気ではなく、今回のレースの馬番・人気に差し替える
     result = result.drop(columns=["馬番", "人気"]).merge(
@@ -205,11 +205,26 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
         return
 
     st.write(f"**{selected_name}** と過去に同じレースに出走したことのある出走予定馬との対戦成績:")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "馬番": st.column_config.NumberColumn("馬番", width="small"),
+            "優劣": st.column_config.TextColumn("優劣", width="small"),
+        },
+    )
 
     with st.expander("対戦の詳細（レースごとの着順）を見る"):
         st.caption("タイム差は「本馬のタイム − 相手のタイム」。本馬の方が速い(勝ち)ほどマイナスになります。")
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            detail_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "馬番": st.column_config.NumberColumn("馬番", width="small"),
+            },
+        )
 
 
 # --- 1. 開催日からレースを選ぶ -----------------------------------------

@@ -190,6 +190,36 @@ def get_horse_name(horse_id: str) -> str:
     return _extract_horse_name_from_title(title_tag.text, horse_id)
 
 
+def _extract_ninki(tr):
+    """
+    <tr>から「人気」の値を取得する。
+
+    netkeibaの出馬表テーブルでは、オッズと人気が隣接する2つの<td>に
+    分かれている。
+      - オッズ:  <td class="Popular Txt_R"><span class="Odds_Ninki">4.4</span></td>
+      - 人気:    <td class="Popular Txt_C ...."><span>2</span></td>
+    どちらのclassにも "Popular" が含まれるため、ヘッダー列位置だけで
+    判定するとオッズ側の<td>を人気列と誤認することがある。その場合、
+    オッズの文字列(例 "4.4")から正規表現で最初の数字("4")を拾って
+    しまい、本来の人気("2")とは異なる値になる。
+    これを避けるため、class名で明示的に「オッズ側(Txt_R / Odds_Ninki)」を
+    除外し、「人気側(Txt_C)」の<td>だけを対象にする。
+    """
+    for td in tr.find_all("td"):
+        classes = td.get("class") or []
+        if "Popular" not in classes:
+            continue
+        if "Txt_R" in classes or td.find("span", class_="Odds_Ninki") is not None:
+            continue  # オッズ側のtdはスキップ
+        if "Txt_C" not in classes:
+            continue
+        text = td.get_text(strip=True)
+        m = re.search(r"\d+", text)
+        if m:
+            return int(m.group())
+    return None
+
+
 def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
     """
     レースの出馬表(発走前)または結果(発走後にこのページを見た場合)の
@@ -231,7 +261,6 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
             break
 
     umaban_idx = header_texts.index("馬番") if "馬番" in header_texts else None
-    ninki_idx = header_texts.index("人気") if "人気" in header_texts else None
 
     seen = {}
 
@@ -257,11 +286,7 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
             if text.isdigit():
                 umaban = int(text)
 
-        ninki = None
-        if ninki_idx is not None and ninki_idx < len(tds):
-            mm = re.search(r"\d+", tds[ninki_idx].get_text(strip=True))
-            if mm:
-                ninki = int(mm.group())
+        ninki = _extract_ninki(tr)
 
         seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
 
@@ -295,11 +320,7 @@ def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
                     if text.isdigit():
                         umaban = int(text)
 
-                ninki_cell = tr.select_one("td[class*='Popular']")
-                if ninki_cell is not None:
-                    mm = re.search(r"\d+", ninki_cell.get_text(strip=True))
-                    if mm:
-                        ninki = int(mm.group())
+                ninki = _extract_ninki(tr)
 
             seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
 
