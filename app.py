@@ -160,34 +160,52 @@ def style_by_ninki(df: pd.DataFrame):
     return styler.applymap(_color, subset=["人気"])
 
 
-def _rank_top3_colors(values: pd.Series, ascending: bool) -> pd.Series:
+def speed_index_rank_colors(speed_df: pd.DataFrame):
     """
-    values を順位付けし、1〜3位に対応する背景色(人気と同じ配色)を、
-    元の行位置(index)を保ったままSeriesとして返す(4位以下・NaNは空文字)。
+    speed_df (レース出走馬全体分の 馬番・平均指数・最高指数) を元に、
+    レース全体で見た平均指数・最高指数の1〜3位を計算し、
+    馬番 -> 背景色 の対応表 (dict) を返す ((平均指数用, 最高指数用) のタプル)。
 
-    ascending=True: 値が小さいほど上位(タイム・上がり3Fなど)
-    ascending=False: 値が大きいほど上位(スピード指数など)
+    表(距離・馬場種別ごとの持ちタイムランキング)は、その距離・馬場種別を
+    走ったことのある馬だけの部分集合になるため、表内だけで順位を計算すると
+    同じ馬でも表によって色が変わってしまう。それを避けるため、必ず
+    「このレースに出走する馬全体」を母集団にして順位を固定する。
     """
-    numeric = pd.to_numeric(values, errors="coerce")
-    ranks = numeric.rank(method="min", ascending=ascending)
+    empty = ({}, {})
+    if speed_df is None or speed_df.empty:
+        return empty
 
-    def _color(rank):
-        if pd.isna(rank) or int(rank) not in NINKI_COLORS:
-            return ""
-        return f"background-color: {NINKI_COLORS[int(rank)]}"
+    def _rank_colors(values: pd.Series, umaban: pd.Series, ascending: bool) -> dict:
+        numeric = pd.to_numeric(values, errors="coerce")
+        ranks = numeric.rank(method="min", ascending=ascending)
+        colors = {}
+        for u, r in zip(umaban, ranks):
+            if pd.isna(r) or pd.isna(u):
+                continue
+            rank_int = int(r)
+            if rank_int in NINKI_COLORS:
+                colors[int(u)] = f"background-color: {NINKI_COLORS[rank_int]}"
+        return colors
 
-    return ranks.apply(_color)
+    avg_colors = _rank_colors(speed_df["平均指数"], speed_df["馬番"], ascending=False)
+    max_colors = _rank_colors(speed_df["最高指数"], speed_df["馬番"], ascending=False)
+    return avg_colors, max_colors
 
 
-def style_result_table(df: pd.DataFrame):
+def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_max_colors: dict = None):
     """
     持ちタイム比較表に色付けを行うStyler。
     - 人気: 1〜3位のセルに色付け(値そのものが順位)
-    - タイム・上がり3F: 列内で速い順に1〜3位のセルに色付け
+    - タイム・上がり3F: 表内(=この距離・馬場種別を走ったことのある馬同士)で
+      速い順に1〜3位のセルに色付け
       (タイムは表示用の文字列"1:33.4"のため、順位判定だけ秒数に変換する)
-    - 平均指数・最高指数: 列内で高い順に1〜3位のセルに色付け
-      (あわせて小数第2位までの表示に揃える)
+    - 平均指数・最高指数: 表内の順位ではなく、レースに出走する馬全体の中で
+      高い順に1〜3位のセルに色付け(speed_index_rank_colors()で事前計算した
+      馬番 -> 色の対応表をそのまま参照する。あわせて小数第2位までの表示に揃える)
     """
+    speed_avg_colors = speed_avg_colors or {}
+    speed_max_colors = speed_max_colors or {}
+
     styler = style_by_ninki(df)
 
     time_seconds = df["タイム"].apply(
@@ -196,8 +214,6 @@ def style_result_table(df: pd.DataFrame):
     rank_targets = [
         ("タイム", time_seconds, True),
         ("上がり3F", df["上がり3F"], True),
-        ("平均指数", df["平均指数"], False),
-        ("最高指数", df["最高指数"], False),
     ]
 
     for column, values, ascending in rank_targets:
@@ -207,6 +223,19 @@ def style_result_table(df: pd.DataFrame):
             return [colors.get(idx, "") for idx in col.index]
 
         styler = styler.apply(_apply, subset=[column])
+
+    def _apply_speed_colors(col: pd.Series, color_map: dict):
+        return [
+            color_map.get(int(u), "") if pd.notna(u) else ""
+            for u in df["馬番"]
+        ]
+
+    styler = styler.apply(
+        lambda col: _apply_speed_colors(col, speed_avg_colors), subset=["平均指数"]
+    )
+    styler = styler.apply(
+        lambda col: _apply_speed_colors(col, speed_max_colors), subset=["最高指数"]
+    )
 
     styler = styler.format({"平均指数": "{:.2f}", "最高指数": "{:.2f}"}, na_rep="")
 
@@ -304,7 +333,12 @@ def render_result_table(
 
     label = f"{venue}・{surface}{distance}m" if venue else f"{surface}{distance}m"
     st.success(f"分析完了（{label} 持ちタイムランキング）")
-    st.dataframe(style_result_table(result), use_container_width=True, hide_index=True)
+    speed_avg_colors, speed_max_colors = speed_index_rank_colors(speed_df)
+    st.dataframe(
+        style_result_table(result, speed_avg_colors, speed_max_colors),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
@@ -453,6 +487,8 @@ elif races_df is not None:
         tab_time, tab_h2h = st.tabs(["🏇 持ちタイム", "🥊 対戦成績"])
 
         with tab_time:
+            st.caption("※ 表右上にある目のアイコンから表示するカラムを変更できます")
+            st.caption("※ スピード指数は過去5走分のデータを使用しており、前日から取得できます")
             pairs_df = (
                 compare_df[["馬場種別", "距離"]]
                 .dropna()
