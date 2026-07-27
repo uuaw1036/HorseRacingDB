@@ -289,7 +289,8 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
         format_dict["最高指数"] = "{:.2f}"
     format_dict.update(race_col_format)
 
-    styler = styler.format(format_dict, na_rep="")
+    if format_dict:
+        styler = styler.format(format_dict, na_rep="")
 
     return styler
 
