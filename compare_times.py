@@ -152,10 +152,11 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     target_horse_id: 基準にする馬の horse_id。
 
     戻り値: (summary_df, detail_df) のタプル。
-      summary_df: 対戦相手ごとの通算成績(○勝●敗△分)。
-      detail_df:  レースごとの対戦詳細(日付・レース名・着順・タイム差など)。
+      summary_df: 対戦相手ごとの通算成績(馬番・対戦相手・○勝●敗△分)。
+      detail_df:  レースごとの対戦詳細(馬番・日付・レース名・着順・タイム差など)。
       「引き分け(△)」は実際に同着だった場合のみで、着順が数値として
       比較できない対戦(出走取消・除外など)はそもそも集計対象から除外する。
+      引き分けが0件の場合は「◯分」の表示自体を省略する。
       対戦記録が無い場合はどちらも空のDataFrame。
     """
     empty = pd.DataFrame()
@@ -212,6 +213,9 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
 
     merged["結果"] = merged.apply(_result, axis=1)
 
+    # 対戦相手の馬番を今回のレースの出馬表(entries)から付与する
+    merged = merged.merge(entries[["horse_id", "馬番"]], on="horse_id", how="left")
+
     # 相手馬とのタイム差(本馬のタイム - 相手のタイム。本馬の方が速ければマイナス)
     if "本馬タイム" in merged.columns and "相手タイム" in merged.columns:
         def _diff(row):
@@ -225,16 +229,28 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     else:
         merged["タイム差(本馬-相手)"] = None
 
+    def _summarize(s: pd.Series) -> str:
+        wins = int((s == "○").sum())
+        losses = int((s == "●").sum())
+        draws = int((s == "△").sum())
+        text = f"{wins}勝{losses}敗"
+        if draws > 0:
+            # 引き分け(同着)が実際にある場合のみ表示する
+            text += f"{draws}分"
+        return text
+
     summary_df = (
-        merged.groupby("対戦相手")["結果"]
-        .apply(lambda s: f"{(s == '○').sum()}勝{(s == '●').sum()}敗{(s == '△').sum()}分")
+        merged.groupby(["馬番", "対戦相手"])["結果"]
+        .apply(_summarize)
         .reset_index()
         .rename(columns={"結果": "対戦成績(本馬から見て)"})
+        .sort_values("馬番")
+        .reset_index(drop=True)
     )
 
     detail_df = merged[
-        ["対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果", "タイム差(本馬-相手)"]
-    ].sort_values(["対戦相手", "日付"]).reset_index(drop=True)
+        ["馬番", "対戦相手", "日付", "レース名", "本馬着順", "相手着順", "結果", "タイム差(本馬-相手)"]
+    ].sort_values(["馬番", "日付"]).reset_index(drop=True)
 
     return summary_df, detail_df
 

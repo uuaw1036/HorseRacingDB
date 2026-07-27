@@ -128,15 +128,27 @@ def parse_distance_column(value: str):
     return surface, distance
 
 
-def _parse_venue_name(value: str) -> str:
+def parse_venue_name(value: str) -> str:
     """
-    netkeibaの過去成績テーブルの「開催」列は "3阪神6"(3回阪神6日目)の
-    ように、開催回数・競馬場名・日目の数字が結合された文字列になっている。
-    ここから競馬場名の部分だけ("阪神"など)を取り出す。
+    以下のような開催表記から競馬場名だけを取り出す。
+      - "3阪神6"          (馬柱ページの「開催」欄。N回+場名+N日目が連結)
+      - "2回 福島 3日目"   (レース一覧ページの開催名。空白区切り)
+    競馬場名以外の部分(開催回数・日目・空白)を取り除いて返す。
     """
-    value = str(value).strip()
-    m = re.search(r"[^\d]+", value)
-    return m.group(0) if m else value
+    text = str(value).strip()
+
+    # 空白区切りで "N回 場名 N日目" になっているケース(レース一覧ページ)
+    tokens = text.split()
+    if (
+        len(tokens) == 3
+        and re.fullmatch(r"\d+回", tokens[0])
+        and re.fullmatch(r"\d+日目?", tokens[2])
+    ):
+        return tokens[1]
+
+    # 空白なしで詰まっている "3阪神6" のようなケース(過去成績ページ)
+    m = re.search(r"[^\d\s]+", text)
+    return m.group(0) if m else text
 
 
 def _extract_horse_name_from_title(title_text: str, fallback: str) -> str:
@@ -178,66 +190,118 @@ def get_horse_name(horse_id: str) -> str:
     return _extract_horse_name_from_title(title_tag.text, horse_id)
 
 
-def get_race_entries(race_id: str) -> pd.DataFrame:
+def get_race_entries(race_id: str, central: bool = True) -> pd.DataFrame:
     """
-    レースの出馬表ページから、出走馬の horse_id と馬名の一覧を取得する。
+    レースの出馬表(発走前)または結果(発走後にこのページを見た場合)の
+    ページから、出走馬の horse_id・馬名・馬番・人気の一覧を取得する。
 
-    URL: https://race.netkeiba.com/race/shutuba.html?race_id={race_id}
+    central: True なら中央競馬(race.netkeiba.com)、False なら地方競馬
+             (nar.netkeiba.com)のページを見にいく。馬個別の過去成績
+             (get_horse_past_results)はどちらの場合も db.netkeiba.com を
+             見るため、この引数の影響を受けない(同じ関数がそのまま使える)。
+
+    URL: https://{race.netkeiba.com か nar.netkeiba.com}/race/shutuba.html?race_id={race_id}
     race_id の調べ方: netkeibaでレースページを開き、URLの "race_id=" の
     後ろの数字部分をコピーする(例: race_id=202506050812)。
 
-    ※ このページは UTF-8 エンコード。db.netkeiba.com(EUC-JP)とは異なるので注意。
+    ※ このページは発走前は出馬表、発走後は結果(着順・タイム・人気など)が
+      そのまま表示されることがあり、CSSクラス名も微妙に異なる。クラス名に
+      依存せず、テーブルの見出し(<thead>)から「馬番」「人気」列の位置を
+      都度判定して抽出することで、両方のケースや中央/地方の違いに対応する。
     """
-    url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
+    domain = "race.netkeiba.com" if central else "nar.netkeiba.com"
+    url = f"https://{domain}/race/shutuba.html?race_id={race_id}"
     response = requests.get(url, headers=HEADERS)
     response.raise_for_status()
     response.encoding = "utf-8"
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    seen = {}
-    for a in soup.find_all("a", href=True):
-        match = re.search(r"/horse/(\d{8,12})/?(?:[\"?]|$)", a["href"])
-        if not match:
+    # 「馬番」列を持つテーブルを探し、そのヘッダーから列位置を判定する
+    target_table = None
+    header_texts = []
+    for t in soup.find_all("table"):
+        thead = t.find("thead")
+        if thead is None or thead.find("tr") is None:
             continue
-        horse_id = match.group(1)
+        texts = [_clean_header_cell_text(th) for th in thead.find("tr").find_all("th")]
+        if "馬番" in texts:
+            target_table = t
+            header_texts = texts
+            break
+
+    umaban_idx = header_texts.index("馬番") if "馬番" in header_texts else None
+    ninki_idx = header_texts.index("人気") if "人気" in header_texts else None
+
+    seen = {}
+
+    tbody = target_table.find("tbody") if target_table is not None else None
+    for tr in (tbody.find_all("tr") if tbody is not None else []):
+        a = tr.find("a", href=re.compile(r"/horse/\d{8,12}"))
+        if a is None:
+            continue
+        m = re.search(r"/horse/(\d{8,12})/?(?:[\"?]|$)", a["href"])
+        if not m:
+            continue
+        horse_id = m.group(1)
         if horse_id in seen:
-            continue  # ページ内に同じ馬へのリンクが複数出るため重複除外
+            continue
         name = a.get("title") or a.text.strip()
         if not name:
             continue
 
-        # このレースでの馬番を、同じ行(<tr>)の中から探す。
-        # netkeibaの出馬表は <td class="Umaban ..."> に馬番が入っているのが
-        # 一般的だが、HTML構造はサイト改修で変わることがあるため、
-        # 見つからない場合は行内の最初の数字セルをフォールバックとして使う。
+        tds = tr.find_all("td")
         umaban = None
-        ninki = None
-        tr = a.find_parent("tr")
-        if tr is not None:
-            umaban_cell = tr.select_one("td[class*='Umaban']")
-            if umaban_cell is None:
-                for td in tr.find_all("td"):
-                    text = td.get_text(strip=True)
-                    if text.isdigit():
-                        umaban_cell = td
-                        break
-            if umaban_cell is not None:
-                text = umaban_cell.get_text(strip=True)
-                if text.isdigit():
-                    umaban = int(text)
+        if umaban_idx is not None and umaban_idx < len(tds):
+            text = tds[umaban_idx].get_text(strip=True)
+            if text.isdigit():
+                umaban = int(text)
 
-            # このレースでの「人気」も同じ行から取得する。
-            # netkeibaの出馬表では <td class="Popular ..."> に人気順位が入る。
-            # ただしオッズ確定前(発売前)はこのセルが空のことがあるため、
-            # 見つからない/数字でない場合はNoneのままにしておく。
-            ninki_cell = tr.select_one("td[class*='Popular']")
-            if ninki_cell is not None:
-                m = re.search(r"\d+", ninki_cell.get_text(strip=True))
-                if m:
-                    ninki = int(m.group())
+        ninki = None
+        if ninki_idx is not None and ninki_idx < len(tds):
+            mm = re.search(r"\d+", tds[ninki_idx].get_text(strip=True))
+            if mm:
+                ninki = int(mm.group())
 
         seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
+
+    # --- テーブルからの構造化抽出がうまくいかなかった場合のフォールバック ---
+    # (ページ構造が想定と大きく異なる場合の保険。クラス名頼みの旧方式)
+    if not seen:
+        for a in soup.find_all("a", href=True):
+            match = re.search(r"/horse/(\d{8,12})/?(?:[\"?]|$)", a["href"])
+            if not match:
+                continue
+            horse_id = match.group(1)
+            if horse_id in seen:
+                continue
+            name = a.get("title") or a.text.strip()
+            if not name:
+                continue
+
+            umaban = None
+            ninki = None
+            tr = a.find_parent("tr")
+            if tr is not None:
+                umaban_cell = tr.select_one("td[class*='Umaban']")
+                if umaban_cell is None:
+                    for td in tr.find_all("td"):
+                        text = td.get_text(strip=True)
+                        if text.isdigit():
+                            umaban_cell = td
+                            break
+                if umaban_cell is not None:
+                    text = umaban_cell.get_text(strip=True)
+                    if text.isdigit():
+                        umaban = int(text)
+
+                ninki_cell = tr.select_one("td[class*='Popular']")
+                if ninki_cell is not None:
+                    mm = re.search(r"\d+", ninki_cell.get_text(strip=True))
+                    if mm:
+                        ninki = int(mm.group())
+
+            seen[horse_id] = {"馬名": name, "馬番": umaban, "人気": ninki}
 
     if not seen:
         raise ValueError(
@@ -253,7 +317,7 @@ def get_race_entries(race_id: str) -> pd.DataFrame:
     )
 
 
-def get_race_list(date: str) -> pd.DataFrame:
+def get_race_list(date: str, central: bool = True) -> pd.DataFrame:
     """
     指定した開催日に行われるレースの一覧(race_id・開催場・R番号・
     発走時刻・レース名)を取得する。
@@ -261,8 +325,10 @@ def get_race_list(date: str) -> pd.DataFrame:
     date: "YYYYMMDD" 形式の文字列 (例: "20250504")。"2025-05-04" や
           "2025/05/04" のようにハイフン・スラッシュ入りで渡しても
           自動的に取り除いて解釈する。
+    central: True なら中央競馬(race.netkeiba.com)、False なら地方競馬
+             (nar.netkeiba.com)の開催日程を見にいく。
 
-    URL: https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date}
+    URL: https://{race.netkeiba.com か nar.netkeiba.com}/top/race_list_sub.html?kaisai_date={date}
 
     ※ 「race_list.html」(末尾に "_sub" が付かない方)はJavaScriptで
       レース一覧を後から描画するページで、requestsで取得した生HTMLには
@@ -281,9 +347,11 @@ def get_race_list(date: str) -> pd.DataFrame:
     if not re.fullmatch(r"\d{8}", date):
         raise ValueError(f"日付は YYYYMMDD 形式で指定してください(例: 20250504): {date}")
 
-    url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date}"
+    url = f"https://{'race' if central else 'nar'}.netkeiba.com/top/race_list_sub.html?kaisai_date={date}"
     sub_headers = dict(HEADERS)
-    sub_headers["Referer"] = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
+    sub_headers["Referer"] = (
+        f"https://{'race' if central else 'nar'}.netkeiba.com/top/race_list.html?kaisai_date={date}"
+    )
     sub_headers["X-Requested-With"] = "XMLHttpRequest"
     response = requests.get(url, headers=sub_headers)
     response.raise_for_status()
@@ -445,7 +513,7 @@ def get_horse_past_results(horse_id: str) -> pd.DataFrame:
 
     # 開催列(例:"3阪神6" = 3回阪神6日目)から競馬場名だけを取り出して「場」列にする
     if "開催" in df.columns:
-        df["場"] = df["開催"].apply(_parse_venue_name)
+        df["場"] = df["開催"].apply(parse_venue_name)
 
     df["horse_id"] = horse_id
     df["馬名"] = horse_name
@@ -500,7 +568,7 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def compare_race_horses(race_id: str, distance: int = None) -> pd.DataFrame:
+def compare_race_horses(race_id: str, distance: int = None, central: bool = True) -> pd.DataFrame:
     """
     race_id を渡すだけで、そのレースの出走馬全員の持ちタイムを比較する。
 
@@ -510,12 +578,16 @@ def compare_race_horses(race_id: str, distance: int = None) -> pd.DataFrame:
     4. distance を指定すればその距離での比較表(compare_by_distance)を返す。
        指定しなければ、全過去レース分のデータをそのまま返す。
 
+    central: True なら中央競馬、False なら地方競馬のrace_idとして扱う
+             (get_race_entries に渡すだけで、各馬の過去成績取得自体は
+             どちらでも db.netkeiba.com を見るため変わらない)。
+
     使用例:
         df = compare_race_horses("202506050812", distance=1600)
     """
     from compare_times import compare_by_distance
 
-    entries = get_race_entries(race_id)
+    entries = get_race_entries(race_id, central=central)
     print(f"出走馬 {len(entries)}頭 を取得しました: {', '.join(entries['馬名'])}")
 
     raw_df = get_multiple_horses(entries["horse_id"].tolist())

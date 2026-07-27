@@ -10,6 +10,7 @@ from scrape_netkeiba import (
     get_race_entries,
     get_race_list,
     parse_distance_column,
+    parse_venue_name,
     prepare_for_compare,
 )
 from compare_times import best_time_per_horse, compare_by_distance, head_to_head_records
@@ -59,10 +60,10 @@ for key in ["race_list_df", "compare_df", "compare_entries", "compare_race_id", 
         st.session_state[key] = None
 
 
-def fetch_compare_data(race_id: str):
+def fetch_compare_data(race_id: str, central: bool = True):
     """race_id の出走馬を取得し、持ちタイム比較用データを1回だけ取得してセッションに保存する。"""
     with st.spinner("出走馬一覧を取得中..."):
-        entries = get_race_entries(race_id)
+        entries = get_race_entries(race_id, central=central)
 
     st.success(f"出走馬 {len(entries)}頭 を取得しました。")
 
@@ -121,14 +122,32 @@ def style_by_ninki(df: pd.DataFrame):
     return styler.applymap(_color, subset=["人気"])
 
 
-def build_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, surface: str):
+def build_table(
+    compare_df: pd.DataFrame,
+    entries: pd.DataFrame,
+    distance: int,
+    surface: str,
+    venue: str = None,
+):
     """
     compare_df から指定の距離・馬場種別のランキングを作り、
     現在のレースの馬番(entriesの馬番)に差し替えて返す。
+
+    venue を指定した場合は、さらに「場」列(過去成績を記録したレースの
+    競馬場)がそのvenueと一致する行だけに絞り込む(=このレースと同じ
+    競馬場での持ちタイムだけを見たい場合に使う)。
     """
     result = compare_by_distance(compare_df, distance, surface)
     if result.empty:
         return result
+
+    if venue:
+        result = result[result["場"] == venue]
+        if result.empty:
+            return result
+        # 絞り込みで順位に欠番ができるため、振り直す
+        result = result.sort_values("順位").reset_index(drop=True)
+        result["順位"] = result.index + 1
 
     # 過去成績時点の馬番・人気ではなく、今回のレースの馬番・人気に差し替える
     result = result.drop(columns=["馬番", "人気"]).merge(
@@ -145,14 +164,22 @@ def build_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, 
     return result[DISPLAY_COLUMNS]
 
 
-def render_result_table(compare_df: pd.DataFrame, entries: pd.DataFrame, distance: int, surface: str):
+def render_result_table(
+    compare_df: pd.DataFrame,
+    entries: pd.DataFrame,
+    distance: int,
+    surface: str,
+    venue: str = None,
+):
     """セッションに保存済みのデータから、選択された距離・馬場種別のテーブルだけを表示する(再取得なし)。"""
-    result = build_table(compare_df, entries, distance, surface)
+    result = build_table(compare_df, entries, distance, surface, venue=venue)
     if result.empty:
-        st.info(f"出走馬の中に {surface}{distance}mを走った記録がある馬はいません。")
+        where = f"{venue}の{surface}{distance}m" if venue else f"{surface}{distance}m"
+        st.info(f"出走馬の中に {where}を走った記録がある馬はいません。")
         return
 
-    st.success(f"分析完了（{surface}{distance}m 持ちタイムランキング）")
+    label = f"{venue}・{surface}{distance}m" if venue else f"{surface}{distance}m"
+    st.success(f"分析完了（{label} 持ちタイムランキング）")
     st.dataframe(style_by_ninki(result), use_container_width=True, hide_index=True)
 
 
@@ -186,13 +213,16 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
 
 
 # --- 1. 開催日からレースを選ぶ -----------------------------------------
+racing_type = st.radio("競馬の種類", ["中央競馬", "地方競馬"], horizontal=True, key="racing_type")
+is_central = racing_type == "中央競馬"
+
 selected_date = st.date_input("開催日を選択", value=date.today())
 
 if st.button("この日のレースを検索", use_container_width=True, key="search_races"):
     date_str = selected_date.strftime("%Y%m%d")
     try:
         with st.spinner("レース一覧を取得中..."):
-            st.session_state.race_list_df = get_race_list(date_str)
+            st.session_state.race_list_df = get_race_list(date_str, central=is_central)
     except Exception as e:
         st.session_state.race_list_df = None
         st.error(f"レース一覧の取得に失敗しました: {e}")
@@ -259,9 +289,13 @@ elif races_df is not None:
     # 馬場種別・距離を求めておく(取得後、デフォルトで表示する距離に使う)。
     race_surface, race_distance = parse_distance_column(chosen_row.get("距離", ""))
 
+    # 「2回 福島 3日目」のような開催名から競馬場名だけを抽出しておく
+    # (過去成績側の「場」列と突き合わせて絞り込むために使う)。
+    race_venue_clean = parse_venue_name(chosen_row.get("開催", "")) or None
+
     # --- 2. 出走馬の持ちタイムを取得(スクレイピングはここだけ) ---------
     if st.button("このレースの出走馬の情報を取得", use_container_width=True, key="fetch"):
-        fetch_compare_data(chosen_race_id)
+        fetch_compare_data(chosen_race_id, central=is_central)
 
     # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
     # 別のレースを選んでも、再取得ボタンを押すまでは前回取得したデータを
@@ -305,12 +339,15 @@ elif races_df is not None:
 
                 render_result_table(compare_df, entries, distance_choice, surface_choice)
 
-            # このレース自体の馬場種別・距離に固定した表を、選択式の表とは
-            # 別にもう一つ、常に表示しておく(上のセレクトボックスで別の
-            # 距離を選んでいても、このレースの条件は常に見えるようにする)。
+            # このレース自体の馬場種別・距離・競馬場に固定した表を、選択式の
+            # 表とは別にもう一つ、常に表示しておく(上のセレクトボックスで
+            # 別の距離を選んでいても、このレースの条件は常に見えるように
+            # する)。「場」もこのレースの競馬場と同じものだけに絞り込む。
             st.markdown("#### 📍 このレースの条件での持ちタイム")
             if race_surface and race_distance:
-                render_result_table(compare_df, entries, race_distance, race_surface)
+                render_result_table(
+                    compare_df, entries, race_distance, race_surface, venue=race_venue_clean
+                )
             else:
                 st.info("このレース自体の馬場種別・距離が判別できませんでした。")
 
