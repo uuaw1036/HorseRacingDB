@@ -20,7 +20,7 @@ st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout=
 
 st.markdown("## 🏇 持ちタイム比較&対戦成績ダッシュボード")
 st.write(
-    "※30分間に5回以上の取得をする際はIPアドレスの変更を推奨"
+    "※30分間に5回以上の取得をする際はIPアドレスの変更を推奨します"
     "（Wi-Fiを変更・切断、VPN接続等）"
 )
 
@@ -32,7 +32,7 @@ NINKI_COLORS = {
 }
 
 # 最終的な表示列(馬番〜着順、タイムが速い順に並ぶ)。horse_idは表示直前に落とす。
-DISPLAY_COLUMNS = [
+CENTRAL_DISPLAY_COLUMNS = [
     "馬番",
     "馬名",
     "人気",
@@ -53,11 +53,33 @@ DISPLAY_COLUMNS = [
     "5走前",
 ]
 
-# jiro8スピード指数のうち「馬番」以外の列(app.py内でのデフォルト値作成・
-# マージ・書式設定を1箇所にまとめて管理するため定数化)
+NAR_DISPLAY_COLUMNS = [
+    "馬番",
+    "馬名",
+    "人気",
+    "馬場状態",
+    "場",
+    "タイム",
+    "上がり3F",
+    "通過",
+    "馬体重",
+    "斤量",
+    "着順",
+]
+
 SPEED_INDEX_VALUE_COLUMNS = ["平均指数", "最高指数", "前走", "2走前", "3走前", "4走前", "5走前"]
 
 # --- セッション状態の初期化 -------------------------------------------
+# race_list_df: 選択した開催日のレース候補一覧
+# compare_df / compare_entries / compare_race_id: 一度取得した出走馬の
+#   持ちタイムデータ。距離の切り替えはここから再計算するだけにして、
+#   スクレイピングを何度も走らせないようにする。
+# raw_df: 各出走馬の過去成績の生データ(persist_for_compare前)。
+#   対戦成績(馬同士の勝敗)機能で使う。持ちタイム取得時に一度スクレイピング
+#   したデータをそのまま再利用し、対戦成績のためだけの追加スクレイピングは
+#   行わない。
+# speed_index_df: jiro8サイトから取得した、出走馬ごとの過去5走分の
+#   スピード指数(平均指数・最高指数)。持ちタイム表の一番右に表示する。
 for key in [
     "race_list_df",
     "compare_df",
@@ -104,6 +126,8 @@ def fetch_compare_data(race_id: str, central: bool = True):
     raw_df = pd.concat(all_dfs, ignore_index=True)
     compare_df = prepare_for_compare(raw_df)
 
+    # jiro8は中央競馬のレースしか扱っていないサイトのため、地方競馬のときは
+    # そもそも取得を試みない(取得しても対応ページが無くエラーになるだけのため)。
     if central:
         with st.spinner("スピード指数(jiro8)を取得中..."):
             try:
@@ -123,6 +147,13 @@ def fetch_compare_data(race_id: str, central: bool = True):
 
 
 def _style_column(df: pd.DataFrame, column: str, color_map: dict):
+    """指定した列だけをセル単位で色分けするStyler。
+
+    pandas 2.1でStyler.applymap()は非推奨となり、後のバージョンでは
+    Styler.map()に置き換わっている(環境によってはapplymapがもう存在しない)。
+    両方のpandasバージョンで動くよう、mapがあればそちらを使う。
+    """
+
     def _color(val):
         color = color_map.get(val)
         return f"background-color: {color}" if color else ""
@@ -134,6 +165,8 @@ def _style_column(df: pd.DataFrame, column: str, color_map: dict):
 
 
 def style_by_ninki(df: pd.DataFrame):
+    """人気列だけをセル単位で色分けするStyler。"""
+
     def _color(val):
         try:
             v = int(val)
@@ -152,6 +185,9 @@ def _rank_top3_colors(values: pd.Series, ascending: bool) -> pd.Series:
     """
     values を順位付けし、1〜3位に対応する背景色(人気と同じ配色)を、
     元の行位置(index)を保ったままSeriesとして返す(4位以下・NaNは空文字)。
+
+    ascending=True: 値が小さいほど上位(タイム・上がり3Fなど)
+    ascending=False: 値が大きいほど上位(スピード指数など)
     """
     numeric = pd.to_numeric(values, errors="coerce")
     ranks = numeric.rank(method="min", ascending=ascending)
@@ -169,6 +205,11 @@ def speed_index_rank_colors(speed_df: pd.DataFrame):
     speed_df (レース出走馬全体分の 馬番・平均指数・最高指数) を元に、
     レース全体で見た平均指数・最高指数の1〜3位を計算し、
     馬番 -> 背景色 の対応表 (dict) を返す ((平均指数用, 最高指数用) のタプル)。
+
+    表(距離・馬場種別ごとの持ちタイムランキング)は、その距離・馬場種別を
+    走ったことのある馬だけの部分集合になるため、表内だけで順位を計算すると
+    同じ馬でも表によって色が変わってしまう。それを避けるため、必ず
+    「このレースに出走する馬全体」を母集団にして順位を固定する。
     """
     empty = ({}, {})
     if speed_df is None or speed_df.empty:
@@ -194,6 +235,13 @@ def speed_index_rank_colors(speed_df: pd.DataFrame):
 def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_max_colors: dict = None):
     """
     持ちタイム比較表に色付けを行うStyler。
+    - 人気: 1〜3位のセルに色付け(値そのものが順位)
+    - タイム・上がり3F: 表内(=この距離・馬場種別を走ったことのある馬同士)で
+      速い順に1〜3位のセルに色付け
+      (タイムは表示用の文字列"1:33.4"のため、順位判定だけ秒数に変換する)
+    - 平均指数・最高指数: 表内の順位ではなく、レースに出走する馬全体の中で
+      高い順に1〜3位のセルに色付け(speed_index_rank_colors()で事前計算した
+      馬番 -> 色の対応表をそのまま参照する。あわせて小数第2位までの表示に揃える)
     """
     speed_avg_colors = speed_avg_colors or {}
     speed_max_colors = speed_max_colors or {}
@@ -209,6 +257,8 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
     ]
 
     for column, values, ascending in rank_targets:
+        if column not in df.columns:
+            continue
         colors = _rank_top3_colors(values, ascending=ascending)
 
         def _apply(col: pd.Series, colors=colors):
@@ -222,22 +272,33 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
             for u in df["馬番"]
         ]
 
-    styler = styler.apply(
-        lambda col: _apply_speed_colors(col, speed_avg_colors), subset=["平均指数"]
-    )
-    styler = styler.apply(
-        lambda col: _apply_speed_colors(col, speed_max_colors), subset=["最高指数"]
-    )
+    if "平均指数" in df.columns:
+        styler = styler.apply(
+            lambda col: _apply_speed_colors(col, speed_avg_colors), subset=["平均指数"]
+        )
+    if "最高指数" in df.columns:
+        styler = styler.apply(
+            lambda col: _apply_speed_colors(col, speed_max_colors), subset=["最高指数"]
+        )
 
-    race_col_format = {col: "{:.1f}" for col in ["前走", "2走前", "3走前", "4走前", "5走前"]}
-    styler = styler.format(
-        {"平均指数": "{:.2f}", "最高指数": "{:.2f}", **race_col_format}, na_rep=""
-    )
+    race_col_format = {col: "{:.1f}" for col in ["前走", "2走前", "3走前", "4走前", "5走前"] if col in df.columns}
+    format_dict = {}
+    if "平均指数" in df.columns:
+        format_dict["平均指数"] = "{:.2f}"
+    if "最高指数" in df.columns:
+        format_dict["最高指数"] = "{:.2f}"
+    format_dict.update(race_col_format)
+
+    styler = styler.format(format_dict, na_rep="")
 
     return styler
 
 
 def style_by_yuretsu(df: pd.DataFrame):
+    """優劣列だけをセル単位で色分けするStyler。
+
+    優(勝ち越し)は人気3位と同じ色、劣(負け越し)は人気2位と同じ色を使う。
+    """
     yuretsu_colors = {
         "優": NINKI_COLORS[3],
         "劣": NINKI_COLORS[2],
@@ -252,7 +313,21 @@ def build_table(
     surface: str,
     venue: str = None,
     speed_df: pd.DataFrame = None,
+    central: bool = True,
 ):
+    """
+    compare_df から指定の距離・馬場種別のランキングを作り、
+    現在のレースの馬番(entriesの馬番)に差し替えて返す。
+
+    venue を指定した場合は、さらに「場」列(過去成績を記録したレースの
+    競馬場)がそのvenueと一致する行だけに絞り込む(=このレースと同じ
+    競馬場での持ちタイムだけを見たい場合に使う)。
+
+    speed_df を指定した場合は、jiro8サイトから取得した「馬番」ごとの
+    平均指数・最高指数を持ちタイム表にマージする(このレースに対応する
+    スピード指数が取得できていない場合はNoneのままでよく、その場合は
+    平均指数・最高指数の列は空欄になる)。
+    """
     result = compare_by_distance(compare_df, distance, surface)
     if result.empty:
         return result
@@ -261,32 +336,48 @@ def build_table(
         result = result[result["場"] == venue]
         if result.empty:
             return result
+        # compare_by_distance()の時点でタイム昇順に並んでおり、
+        # boolean条件での絞り込みでもその順序は保たれるため、
+        # インデックスを振り直すだけでよい。
         result = result.reset_index(drop=True)
 
+    # 過去成績時点の馬番・人気ではなく、今回のレースの馬番・人気に差し替える
     result = result.drop(columns=["馬番", "人気"]).merge(
         entries[["horse_id", "馬番", "人気"]], on="horse_id", how="left"
     )
     result = result.drop(columns=["horse_id"])
 
+    # 人気はオッズ未確定の馬がいるとNaNが混ざりfloat化して"1.0"のような
+    # 表示になってしまうため、null許容の整数型(Int64)にしておく。
     result["人気"] = pd.array(
         pd.to_numeric(result["人気"], errors="coerce"), dtype="Int64"
     )
 
-    if speed_df is not None and not speed_df.empty:
-        speed_df = speed_df.copy()
-        speed_df["馬番"] = pd.array(
-            pd.to_numeric(speed_df["馬番"], errors="coerce"), dtype="Int64"
-        )
-        available_cols = ["馬番"] + [c for c in SPEED_INDEX_VALUE_COLUMNS if c in speed_df.columns]
-        result = result.merge(speed_df[available_cols], on="馬番", how="left")
-        for col in SPEED_INDEX_VALUE_COLUMNS:
-            if col not in result.columns:
+    display_cols = CENTRAL_DISPLAY_COLUMNS if central else NAR_DISPLAY_COLUMNS
+
+    if central:
+        if speed_df is not None and not speed_df.empty:
+            speed_df = speed_df.copy()
+            speed_df["馬番"] = pd.array(
+                pd.to_numeric(speed_df["馬番"], errors="coerce"), dtype="Int64"
+            )
+            available_cols = ["馬番"] + [c for c in SPEED_INDEX_VALUE_COLUMNS if c in speed_df.columns]
+            result = result.merge(speed_df[available_cols], on="馬番", how="left")
+            for col in SPEED_INDEX_VALUE_COLUMNS:
+                if col not in result.columns:
+                    result[col] = pd.NA
+        else:
+            for col in SPEED_INDEX_VALUE_COLUMNS:
                 result[col] = pd.NA
     else:
         for col in SPEED_INDEX_VALUE_COLUMNS:
-            result[col] = pd.NA
+            if col in result.columns:
+                result = result.drop(columns=[col])
 
-    return result[DISPLAY_COLUMNS]
+    result = result.fillna("")
+
+    valid_cols = [c for c in display_cols if c in result.columns]
+    return result[valid_cols]
 
 
 def render_result_table(
@@ -296,8 +387,10 @@ def render_result_table(
     surface: str,
     venue: str = None,
     speed_df: pd.DataFrame = None,
+    central: bool = True,
 ):
-    result = build_table(compare_df, entries, distance, surface, venue=venue, speed_df=speed_df)
+    """セッションに保存済みのデータから、選択された距離・馬場種別のテーブルだけを表示する(再取得なし)。"""
+    result = build_table(compare_df, entries, distance, surface, venue=venue, speed_df=speed_df, central=central)
     if result.empty:
         where = f"{venue}の{surface}{distance}m" if venue else f"{surface}{distance}m"
         st.info(f"出走馬の中に {where}を走った記録がある馬はいません。")
@@ -305,7 +398,8 @@ def render_result_table(
 
     label = f"{venue}・{surface}{distance}m" if venue else f"{surface}{distance}m"
     st.success(f"分析完了（{label} 持ちタイムランキング）")
-    speed_avg_colors, speed_max_colors = speed_index_rank_colors(speed_df)
+    
+    speed_avg_colors, speed_max_colors = speed_index_rank_colors(speed_df) if central else ({}, {})
     st.dataframe(
         style_result_table(result, speed_avg_colors, speed_max_colors),
         use_container_width=True,
@@ -314,6 +408,7 @@ def render_result_table(
 
 
 def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
+    """出走予定馬同士の対戦成績を表示する(持ちタイム取得時のデータを再利用。追加スクレイピングなし)。"""
     st.subheader("🥊 出走馬同士の対戦成績")
 
     entries_sorted = entries.sort_values("馬番", na_position="last")
@@ -392,6 +487,7 @@ elif races_df is not None:
 
     races_df = races_df.copy()
 
+    # --- 1a. まず開催場所を選ぶ -----------------------------------------
     venues = [v for v in races_df["開催"].tolist() if v]
     venues = list(dict.fromkeys(venues))
 
@@ -412,6 +508,7 @@ elif races_df is not None:
         venue_races = races_df.loc[races_df["開催"] == chosen_venue].copy()
         venue_races["表示名"] = venue_races.apply(_race_label, axis=1)
 
+        # --- 1b. 次にその開催場所の中からレース(R)を選ぶ -----------------
         choice_label = st.selectbox(
             "レースを選択",
             venue_races["表示名"].tolist(),
@@ -425,9 +522,11 @@ elif races_df is not None:
     race_surface, race_distance = parse_distance_column(chosen_row.get("距離", ""))
     race_venue_clean = parse_venue_name(chosen_row.get("開催", "")) or None
 
+    # --- 2. 出走馬の持ちタイムを取得(スクレイピングはここだけ) ---------
     if st.button("このレースの出走馬の情報を取得", use_container_width=True, key="fetch"):
         fetch_compare_data(chosen_race_id, central=is_central)
 
+    # --- 3. 取得済みデータがあれば、距離・馬場種別を切り替えて表示(再取得なし) ---
     if st.session_state.compare_df is not None:
         compare_df = st.session_state.compare_df
         entries = st.session_state.compare_entries
@@ -443,7 +542,9 @@ elif races_df is not None:
 
         with tab_time:
             st.caption("※ 表右上にある目のアイコンから表示するカラムを変更できます")
-            st.caption("※ スピード指数は過去5走分のデータを使用しており、前日から取得できます")
+            if is_central:
+                st.caption("※ スピード指数は過去5走分のデータを使用しており、前日から取得できます")
+
             pairs_df = (
                 compare_df[["馬場種別", "距離"]]
                 .dropna()
@@ -466,12 +567,12 @@ elif races_df is not None:
                 )
                 surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
 
-                render_result_table(compare_df, entries, distance_choice, surface_choice, speed_df=speed_df)
+                render_result_table(compare_df, entries, distance_choice, surface_choice, speed_df=speed_df, central=is_central)
 
             st.markdown("#### 📍 このレースの条件での持ちタイム")
             if race_surface and race_distance:
                 render_result_table(
-                    compare_df, entries, race_distance, race_surface, venue=race_venue_clean, speed_df=speed_df
+                    compare_df, entries, race_distance, race_surface, venue=race_venue_clean, speed_df=speed_df, central=is_central
                 )
             else:
                 st.info("このレース自体の馬場種別・距離が判別できませんでした。")
