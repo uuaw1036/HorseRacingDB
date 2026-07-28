@@ -71,7 +71,27 @@ SPEED_INDEX_VALUE_COLUMNS = ["平均指数", "最高指数", "前走", "2走前"
 
 # 欠損値が本物のNaN/Noneではなく、文字列化された"None"/"nan"等として
 # そのまま入ってきてしまっているケース向けの判定セット。
-NONE_LIKE_STRINGS = {"None", "none", "NaN", "nan", "<NA>", "NAN", "NA"}
+NONE_LIKE_STRINGS = {"none", "nan", "<na>", "na", "null", "nat"}
+
+
+def _is_missing(value) -> bool:
+    """本物の欠損値と、文字列化された欠損値をまとめて判定する。"""
+    if isinstance(value, str):
+        return value.strip().casefold() in NONE_LIKE_STRINGS
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_optional_number(value, decimals: int):
+    """欠損値は空文字、それ以外の数値は指定桁数の表示文字列にする。"""
+    if _is_missing(value):
+        return ""
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (TypeError, ValueError):
+        return value
 
 
 def blank_missing(df: pd.DataFrame, exclude_cols=None) -> pd.DataFrame:
@@ -91,15 +111,14 @@ def blank_missing(df: pd.DataFrame, exclude_cols=None) -> pd.DataFrame:
     target_cols = [c for c in df.columns if c not in exclude_cols]
 
     if target_cols:
-        df[target_cols] = df[target_cols].astype(object).fillna("")
-        df[target_cols] = df[target_cols].apply(
-            lambda col: col.map(lambda v: "" if str(v) in NONE_LIKE_STRINGS else v)
+        df[target_cols] = df[target_cols].astype(object).apply(
+            lambda col: col.map(lambda v: "" if _is_missing(v) else v)
         )
 
     numeric_cols_present = [c for c in exclude_cols if c in df.columns]
     if numeric_cols_present:
         df[numeric_cols_present] = df[numeric_cols_present].apply(
-            lambda col: col.map(lambda v: pd.NA if str(v) in NONE_LIKE_STRINGS else v)
+            lambda col: col.map(lambda v: pd.NA if _is_missing(v) else v)
         )
 
     return df
@@ -316,17 +335,6 @@ def style_result_table(df: pd.DataFrame, speed_avg_colors: dict = None, speed_ma
             lambda col: _apply_speed_colors(col, speed_max_colors), subset=["最高指数"]
         )
 
-    race_col_format = {col: "{:.1f}" for col in ["前走", "2走前", "3走前", "4走前", "5走前"] if col in df.columns}
-    format_dict = {}
-    if "平均指数" in df.columns:
-        format_dict["平均指数"] = "{:.2f}"
-    if "最高指数" in df.columns:
-        format_dict["最高指数"] = "{:.2f}"
-    format_dict.update(race_col_format)
-
-    if format_dict:
-        styler = styler.format(format_dict, na_rep="")
-
     return styler
 
 
@@ -410,11 +418,18 @@ def build_table(
             if col in result.columns:
                 result = result.drop(columns=[col])
 
-    # 平均指数・最高指数・前走〜5走前は style_result_table 側で
-    # "{:.1f}"等の数値フォーマット(na_rep="")を適用するため、
-    # ここで空文字に変換すると "{:.1f}".format("") がエラーになる。
-    # そのためこれらの列だけ除外して blank_missing() をかける。
-    result = blank_missing(result, exclude_cols=SPEED_INDEX_VALUE_COLUMNS)
+    # 数値の欠損をpd.NAのままStreamlitへ渡すと、環境によってはセルに
+    # "None"と表示される。表示直前に書式済み文字列へ変換し、欠損は
+    # 必ず空文字にすることで、Streamlit/pandasのバージョン差を避ける。
+    for col in SPEED_INDEX_VALUE_COLUMNS:
+        if col not in result.columns:
+            continue
+        decimals = 2 if col in ("平均指数", "最高指数") else 1
+        result[col] = result[col].map(
+            lambda value, decimals=decimals: _format_optional_number(value, decimals)
+        )
+
+    result = blank_missing(result)
 
     valid_cols = [c for c in display_cols if c in result.columns]
     return result[valid_cols]
@@ -468,8 +483,8 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
         st.info(f"{selected_name} が他の出走予定馬と同じレースに出走した記録は見つかりませんでした。")
         return
 
-    summary_df = blank_missing(summary_df, exclude_cols=["馬番"])
-    detail_df = blank_missing(detail_df, exclude_cols=["馬番"])
+    summary_df = blank_missing(summary_df)
+    detail_df = blank_missing(detail_df)
 
     st.write(f"**{selected_name}** と過去に同じレースに出走したことのある出走予定馬との対戦成績:")
     st.dataframe(
@@ -477,7 +492,7 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
         use_container_width=True,
         hide_index=True,
         column_config={
-            "馬番": st.column_config.NumberColumn("馬番", width="small"),
+            "馬番": st.column_config.TextColumn("馬番", width="small"),
             "優劣": st.column_config.TextColumn("優劣", width="small"),
         },
     )
@@ -488,7 +503,7 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
             use_container_width=True,
             hide_index=True,
             column_config={
-                "馬番": st.column_config.NumberColumn("馬番", width="small"),
+                "馬番": st.column_config.TextColumn("馬番", width="small"),
             },
         )
 
