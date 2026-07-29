@@ -151,7 +151,8 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     target_horse_id: 基準にする馬の horse_id。
 
     戻り値: (summary_df, detail_df) のタプル。
-      summary_df: 対戦相手ごとの通算成績(馬番・対戦相手・○勝●敗△分・優劣)。
+      summary_df: 対戦相手ごとの通算成績
+                  (馬番・対戦相手・今回の人気・○勝●敗△分・優劣)。
                   優劣は本馬から見て勝ち越しなら「優」、負け越しなら「劣」、
                   五分(勝ち数=負け数)なら「－」。
       detail_df:  レースごとの対戦詳細(馬番・日付・レース名・着順・タイム差など)。
@@ -214,8 +215,8 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
 
     merged["結果"] = merged.apply(_result, axis=1)
 
-    # 対戦相手の馬番を今回のレースの出馬表(entries)から付与する
-    merged = merged.merge(entries[["horse_id", "馬番"]], on="horse_id", how="left")
+    # 対戦相手の馬番・人気を今回のレースの出馬表(entries)から付与する
+    merged = merged.merge(entries[["horse_id", "馬番", "人気"]], on="horse_id", how="left")
 
     # 相手馬とのタイム差(本馬のタイム - 相手のタイム。本馬の方が速ければマイナス)
     if "本馬タイム" in merged.columns and "相手タイム" in merged.columns:
@@ -251,13 +252,26 @@ def head_to_head_records(raw_df: pd.DataFrame, entries: pd.DataFrame, target_hor
     # 複数列に展開されず縦持ち(level_2列付き)になってしまうことがあるため、
     # 明示的にループしてDataFrameを組み立てる。
     summary_rows = []
-    for (umaban, aite), group in merged.groupby(["馬番", "対戦相手"])["結果"]:
-        text, yuretsu = _summarize(group)
+    for _, group in merged.groupby("horse_id", sort=False):
+        text, yuretsu = _summarize(group["結果"])
+        umaban = group["馬番"].iloc[0]
+        aite = group["対戦相手"].iloc[0]
+        ninki = pd.to_numeric(group["人気"].iloc[0], errors="coerce")
+        ninki = int(ninki) if pd.notna(ninki) else None
         summary_rows.append(
-            {"馬番": umaban, "対戦相手": aite, "対戦成績(本馬から見て)": text, "優劣": yuretsu}
+            {
+                "馬番": umaban,
+                "対戦相手": aite,
+                "人気": ninki,
+                "対戦成績(本馬から見て)": text,
+                "優劣": yuretsu,
+            }
         )
     summary_df = (
-        pd.DataFrame(summary_rows, columns=["馬番", "対戦相手", "対戦成績(本馬から見て)", "優劣"])
+        pd.DataFrame(
+            summary_rows,
+            columns=["馬番", "対戦相手", "人気", "対戦成績(本馬から見て)", "優劣"],
+        )
         .sort_values("馬番")
         .reset_index(drop=True)
     )

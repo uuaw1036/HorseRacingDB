@@ -146,6 +146,20 @@ for key in [
         st.session_state[key] = None
 
 
+TIME_TAB_LABEL = "🏇 持ちタイム"
+H2H_TAB_LABEL = "🥊 対戦成績"
+
+
+def _keep_time_tab_open():
+    """持ちタイム内の操作による再実行後も、持ちタイムタブを表示する。"""
+    st.session_state.active_dashboard_tab = TIME_TAB_LABEL
+
+
+def _keep_h2h_tab_open():
+    """対戦成績内の操作による再実行後も、対戦成績タブを表示する。"""
+    st.session_state.active_dashboard_tab = H2H_TAB_LABEL
+
+
 def fetch_compare_data(race_id: str, central: bool = True):
     """race_id の出走馬を取得し、持ちタイム比較用データを1回だけ取得してセッションに保存する。"""
     with st.spinner("出走馬一覧を取得中..."):
@@ -473,7 +487,10 @@ def render_head_to_head(raw_df: pd.DataFrame, entries: pd.DataFrame):
     ]
     horse_label_to_id = dict(zip(labels, entries_sorted["horse_id"]))
     selected_name = st.selectbox(
-        "基準にする馬を選択", list(horse_label_to_id.keys()), key="h2h_horse"
+        "基準にする馬を選択",
+        list(horse_label_to_id.keys()),
+        key="h2h_horse",
+        on_change=_keep_h2h_tab_open,
     )
     target_id = horse_label_to_id[selected_name]
 
@@ -596,7 +613,11 @@ elif races_df is not None:
                 "選択中のレースに更新するには「このレースの出走馬の情報を取得」を押してください。"
             )
 
-        tab_time, tab_h2h = st.tabs(["🏇 持ちタイム", "🥊 対戦成績"])
+        active_tab = st.session_state.get("active_dashboard_tab", TIME_TAB_LABEL)
+        tab_time, tab_h2h = st.tabs(
+            [TIME_TAB_LABEL, H2H_TAB_LABEL],
+            default=active_tab,
+        )
 
         with tab_time:
             st.caption("※ 表右上にある目のアイコンから表示するカラムを変更できます")
@@ -620,12 +641,37 @@ elif races_df is not None:
                 if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
                     default_index = available_pairs.index((race_surface, race_distance))
 
-                choice_label2 = st.selectbox(
-                    "表示する距離 (m)", labels, index=default_index, key="dist_choice"
-                )
+                distance_col, count_col = st.columns([5, 1])
+                with distance_col:
+                    choice_label2 = st.selectbox(
+                        "表示する距離 (m)",
+                        labels,
+                        index=default_index,
+                        key="dist_choice",
+                        on_change=_keep_time_tab_open,
+                    )
                 surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
 
-                render_result_table(compare_df, entries, distance_choice, surface_choice, speed_df=speed_df, central=is_central)
+                id_col = "horse_id" if "horse_id" in compare_df.columns else "馬名"
+                horse_count = compare_df.loc[
+                    (compare_df["馬場種別"] == surface_choice)
+                    & (compare_df["距離"] == distance_choice),
+                    id_col,
+                ].nunique()
+                with count_col:
+                    st.markdown(
+                        f"<div style='text-align:right; padding-top:2.15rem;'>{horse_count}頭</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                render_result_table(
+                    compare_df,
+                    entries,
+                    distance_choice,
+                    surface_choice,
+                    speed_df=speed_df,
+                    central=is_central,
+                )
 
             st.markdown("#### 📍 このレースの条件での持ちタイム")
             if race_surface and race_distance:
