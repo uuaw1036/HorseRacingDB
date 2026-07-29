@@ -635,34 +635,32 @@ elif races_df is not None:
             if not available_pairs:
                 st.info("比較できる過去成績が見つかりませんでした。")
             else:
-                labels = [f"{s}{d}m" for s, d in available_pairs]
+                id_col = "horse_id" if "horse_id" in compare_df.columns else "馬名"
+                pair_counts = {
+                    (surface, distance): compare_df.loc[
+                        (compare_df["馬場種別"] == surface)
+                        & (compare_df["距離"] == distance),
+                        id_col,
+                    ].nunique()
+                    for surface, distance in available_pairs
+                }
+                labels = [
+                    f"{surface}{distance}m　{pair_counts[(surface, distance)]}頭"
+                    for surface, distance in available_pairs
+                ]
 
                 default_index = 0
                 if race_surface and race_distance and (race_surface, race_distance) in available_pairs:
                     default_index = available_pairs.index((race_surface, race_distance))
 
-                distance_col, count_col = st.columns([5, 1])
-                with distance_col:
-                    choice_label2 = st.selectbox(
-                        "表示する距離 (m)",
-                        labels,
-                        index=default_index,
-                        key="dist_choice",
-                        on_change=_keep_time_tab_open,
-                    )
+                choice_label2 = st.selectbox(
+                    "表示する距離 (m)",
+                    labels,
+                    index=default_index,
+                    key="dist_choice",
+                    on_change=_keep_time_tab_open,
+                )
                 surface_choice, distance_choice = available_pairs[labels.index(choice_label2)]
-
-                id_col = "horse_id" if "horse_id" in compare_df.columns else "馬名"
-                horse_count = compare_df.loc[
-                    (compare_df["馬場種別"] == surface_choice)
-                    & (compare_df["距離"] == distance_choice),
-                    id_col,
-                ].nunique()
-                with count_col:
-                    st.markdown(
-                        f"<div style='text-align:right; padding-top:2.15rem;'>{horse_count}頭</div>",
-                        unsafe_allow_html=True,
-                    )
 
                 render_result_table(
                     compare_df,
