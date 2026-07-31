@@ -843,10 +843,10 @@ def prepare_for_compare(df: pd.DataFrame) -> pd.DataFrame:
     if "horse_id" not in out.columns:
         out["horse_id"] = pd.NA
 
-    # 人気・斤量・上がり3F・馬体重・着順・場・通過はあれば引き継ぐ。無い場合は
+    # 人気・斤量・上がり3F・馬体重・着順・場・通過・日付はあれば引き継ぐ。無い場合は
     # 空欄(NaN)の列として追加し、呼び出し側(compare_times.py)が常に同じ
     # 列構成を前提にできるようにする。
-    optional = ["人気", "斤量", "上がり3F", "馬体重", "着順", "場", "通過"]
+    optional = ["人気", "斤量", "上がり3F", "馬体重", "着順", "場", "通過", "日付"]
     for col in optional:
         if col not in out.columns:
             out[col] = pd.NA

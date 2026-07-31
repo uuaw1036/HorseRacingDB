@@ -45,6 +45,19 @@ def seconds_to_time_str(seconds: float) -> str:
     return f"{rem:.1f}"
 
 
+def format_weeks_ago(record_date, reference_date) -> str:
+    """記録日が基準日の何週前かを、経過した7日単位で表示する。"""
+    recorded = pd.to_datetime(record_date, errors="coerce")
+    reference = pd.to_datetime(reference_date, errors="coerce")
+    if pd.isna(recorded) or pd.isna(reference):
+        return ""
+
+    days = (reference.normalize() - recorded.normalize()).days
+    if days < 0:
+        return ""
+    return f"{days // 7}週前"
+
+
 def load_data(csv_path: str) -> pd.DataFrame:
     """
     CSVを読み込み、タイムを秒に変換した列 (タイム_秒) を追加して返す。
@@ -62,6 +75,7 @@ DISPLAY_COLUMNS = [
     "馬場状態",
     "場",
     "タイム",
+    "日付",  # 「何週前」の算出用。表示側では日付自体は表示しない
     "上がり3F",
     "通過",
     "馬体重",
@@ -99,7 +113,7 @@ def compare_by_distance(df: pd.DataFrame, distance: int, surface: str = None) ->
              Noneの場合は距離が一致する全馬場種別を対象にする(通常は
              呼び出し側で芝/ダートを分けて2回呼ぶ想定)。
 
-    戻り値の列は 馬番・馬名・人気・馬場状態・場・タイム・上がり3F・
+    戻り値の列は 馬番・馬名・人気・馬場状態・場・タイム・日付・上がり3F・
     通過・馬体重・斤量・着順 の順(horse_idは突き合わせ用に残すが表示側で落とす)。
     行の並び順はタイムが速い順(ランキング)のまま。
     「タイム」列はここでは自己ベスト時点のタイム(表示用文字列)。

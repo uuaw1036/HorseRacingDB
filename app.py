@@ -14,7 +14,13 @@ from scrape_netkeiba import (
     parse_venue_name,
     prepare_for_compare,
 )
-from compare_times import best_time_per_horse, compare_by_distance, head_to_head_records, parse_time
+from compare_times import (
+    best_time_per_horse,
+    compare_by_distance,
+    format_weeks_ago,
+    head_to_head_records,
+    parse_time,
+)
 
 st.set_page_config(page_title="持ちタイム比較", page_icon="🏇", layout="centered")
 
@@ -39,6 +45,7 @@ CENTRAL_DISPLAY_COLUMNS = [
     "馬場状態",
     "場",
     "タイム",
+    "何週前",
     "上がり3F",
     "通過",
     "馬体重",
@@ -60,6 +67,7 @@ NAR_DISPLAY_COLUMNS = [
     "馬場状態",
     "場",
     "タイム",
+    "何週前",
     "上がり3F",
     "通過",
     "馬体重",
@@ -372,6 +380,7 @@ def build_table(
     venue: str = None,
     speed_df: pd.DataFrame = None,
     central: bool = True,
+    reference_date=None,
 ):
     """
     compare_df から指定の距離・馬場種別のランキングを作り、
@@ -410,6 +419,15 @@ def build_table(
     result["人気"] = pd.array(
         pd.to_numeric(result["人気"], errors="coerce"), dtype="Int64"
     )
+
+    # 持ちタイムを記録した日から対象レースの開催日までの経過週数。
+    # 同じ週（0〜6日前）は「0週前」、日付不明や基準日より未来は空欄にする。
+    if "日付" in result.columns:
+        result["何週前"] = result["日付"].map(
+            lambda value: format_weeks_ago(value, reference_date)
+        )
+    else:
+        result["何週前"] = ""
 
     display_cols = CENTRAL_DISPLAY_COLUMNS if central else NAR_DISPLAY_COLUMNS
 
@@ -457,9 +475,19 @@ def render_result_table(
     venue: str = None,
     speed_df: pd.DataFrame = None,
     central: bool = True,
+    reference_date=None,
 ):
     """セッションに保存済みのデータから、選択された距離・馬場種別のテーブルだけを表示する(再取得なし)。"""
-    result = build_table(compare_df, entries, distance, surface, venue=venue, speed_df=speed_df, central=central)
+    result = build_table(
+        compare_df,
+        entries,
+        distance,
+        surface,
+        venue=venue,
+        speed_df=speed_df,
+        central=central,
+        reference_date=reference_date,
+    )
     if result.empty:
         where = f"{venue}の{surface}{distance}m" if venue else f"{surface}{distance}m"
         st.info(f"出走馬の中に {where}を走った記録がある馬はいません。")
@@ -669,12 +697,20 @@ elif races_df is not None:
                     surface_choice,
                     speed_df=speed_df,
                     central=is_central,
+                    reference_date=selected_date,
                 )
 
             st.markdown("#### 📍 このレースの条件での持ちタイム")
             if race_surface and race_distance:
                 render_result_table(
-                    compare_df, entries, race_distance, race_surface, venue=race_venue_clean, speed_df=speed_df, central=is_central
+                    compare_df,
+                    entries,
+                    race_distance,
+                    race_surface,
+                    venue=race_venue_clean,
+                    speed_df=speed_df,
+                    central=is_central,
+                    reference_date=selected_date,
                 )
             else:
                 st.info("このレース自体の馬場種別・距離が判別できませんでした。")
